@@ -1,15 +1,12 @@
 # data_fetch.py
 from typing import Optional, Tuple
-import re
 from datetime import datetime, timedelta
 
 import requests
-from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
-import streamlit as st  # ← 追加：FMPのAPIキーをst.secretsから取得
+import streamlit as st  # FMPのAPIキーをst.secretsから取得
 
-IRBANK_BASE = "https://irbank.net/"
 FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
 
@@ -33,8 +30,6 @@ def convert_ticker(ticker: str) -> str:
 def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[float]:
     """
     過去1年分の配当から配当利回り（%）を計算。
-    yfinance.Ticker.dividends を使うので、
-    yfinance へのリクエストは download とは別に 1 回増える前提。
     """
     divs = ticker_obj.dividends
 
@@ -81,95 +76,7 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 
 
 # ===========================================================
-# IRBANK から EPS / BPS / PER予 を取得（日本株用）
-# ===========================================================
-def get_eps_bps_irbank(
-    code: str,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    IRBANK の『株式情報 / 指標』ページから
-    - EPS（連 or 単）    → 実績EPS
-    - BPS（連 or 単）    → 実績BPS
-    - PER予              → 予想PER
-
-    を 1 回のリクエストで取得する。
-
-    Parameters
-    ----------
-    code : str
-        '2801' のような数値 4〜5 桁部分を想定（'.T' などは付けない）
-
-    Returns
-    -------
-    (eps_actual, bps_actual, per_fwd)
-        いずれか取得できない場合は None
-    """
-    url = f"{IRBANK_BASE}{code}"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": IRBANK_BASE,
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        # Streamlit のログ用
-        print(f"[IRBANK] request error ({code}): {e}")
-        return None, None, None
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    def extract_number_near(label: str) -> Optional[float]:
-        """
-        ページ内で label にマッチするテキストノードを見つけ、
-        そのノード自身と、近くのテキストノードから数字を探して float 化する。
-
-        「PER予 18.46倍」のようにラベルと数字が
-        同じテキストノードに含まれているケースも拾えるようにする。
-        """
-        node = soup.find(string=re.compile(re.escape(label)))
-        if not node:
-            return None
-
-        cur = node
-        # node 自身 + その後ろ数ノードをチェック
-        for _ in range(8):
-            if cur is None:
-                break
-
-            text = str(cur)
-            m = re.search(r"([\d,]+(?:\.\d+)?)", text)
-            if m:
-                try:
-                    return float(m.group(1).replace(",", ""))
-                except ValueError:
-                    return None
-
-            cur = cur.find_next(string=True)
-
-        return None
-
-    # EPS / BPS（連）優先、なければ単体 or 汎用ラベルをフォールバック
-    eps = (
-        extract_number_near("EPS（連）")
-        or extract_number_near("EPS（単）")
-        or extract_number_near("EPS")
-    )
-    bps = (
-        extract_number_near("BPS（連）")
-        or extract_number_near("BPS（単）")
-        or extract_number_near("BPS")
-    )
-
-    # PER予（予想PER）
-    per_fwd = extract_number_near("PER予")
-
-    return eps, bps, per_fwd
-
-
-# ===========================================================
-# FMP API から US 銘柄の EPS / BPS / 予想EPS を取得
+# FMP 共通ラッパー
 # ===========================================================
 def _fmp_get(path: str, api_key: str, params: Optional[dict] = None):
     """
@@ -192,23 +99,33 @@ def _fmp_get(path: str, api_key: str, params: Optional[dict] = None):
         return None
 
 
-def get_us_fundamentals_fmp(
+# ===========================================================
+# FMP から EPS / BPS / 予想EPS を取得（US も JPX も共通）
+# ===========================================================
+def get_fundamentals_fmp(
     symbol: str,
     price: float,
     api_key: str,
-) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+) -> Tuple[
+    Optional[float],  # eps
+    Optional[float],  # bps
+    Optional[float],  # eps_fwd
+    Optional[float],  # per
+    Optional[float],  # pbr
+    Optional[float],  # per_fwd
+]:
     """
-    FMP から US 銘柄の実績 EPS / BPS / 予想EPS を取得し、
-    予想EPS から PER予 も計算して返す。
+    FMP から実績EPS / BPS / 予想EPSを取得し、
+    そこから PER / PBR / 予想PER も計算する。
 
-    Returns
-    -------
-    (eps_actual, bps_actual, per_fwd, eps_fwd)
+    symbol は "NVDA", "AAPL", "7203.T" など
     """
     eps: Optional[float] = None
     bps: Optional[float] = None
-    per_fwd: Optional[float] = None
     eps_fwd: Optional[float] = None
+    per: Optional[float] = None
+    pbr: Optional[float] = None
+    per_fwd: Optional[float] = None
 
     # --- 実績 EPS: income-statement ---
     income = _fmp_get(f"/income-statement/{symbol}", api_key, {"limit": 1})
@@ -254,11 +171,15 @@ def get_us_fundamentals_fmp(
         except Exception:
             eps_fwd = None
 
-    # 予想PER = price / 予想EPS
+    # --- PER / PBR / 予想PER 計算 ---
+    if eps not in (None, 0.0) and price > 0:
+        per = price / eps
+    if bps not in (None, 0.0) and price > 0:
+        pbr = price / bps
     if eps_fwd not in (None, 0.0) and price > 0:
         per_fwd = price / eps_fwd
 
-    return eps, bps, per_fwd, eps_fwd
+    return eps, bps, eps_fwd, per, pbr, per_fwd
 
 
 # ===========================================================
@@ -273,10 +194,8 @@ def get_price_and_meta(
     株価データとメタ情報を取得して返す。
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
-    - 米国株コードなら FMP で 実績EPS / BPS / 予想EPS を取得し、
-      そこから予想PER も計算
-    - 日本株コードなら IRBANK で 実績EPS / BPS / PER予 を取得し、
-      そこから予想EPSも計算する。
+    - FMP で 実績EPS / BPS / 予想EPS を取得し、
+      そこから PER / PBR / 予想PER も計算する（US も JPX も共通）
 
     失敗時は ValueError を投げる。
     """
@@ -314,43 +233,26 @@ def get_price_and_meta(
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
-    # --- EPS / BPS / 予想PER / 予想EPS ---
-    eps: Optional[float] = None          # 実績EPS
-    bps: Optional[float] = None          # 実績BPS
-    per_fwd: Optional[float] = None      # 予想PER
-    eps_fwd: Optional[float] = None      # 予想EPS
+    # --- FMP からファンダメンタル取得（US / JP 共通）---
+    fmp_key = None
+    try:
+        fmp_key = st.secrets["FMP_API_KEY"]
+    except Exception:
+        print("[FMP] st.secrets['FMP_API_KEY'] が設定されていません。ファンダ指標は取得しません。")
 
-    # 日本株判定
-    is_jp = False
-    code_for_irbank: Optional[str] = None
-    if ticker.endswith(".T"):
-        is_jp = True
-        code_for_irbank = ticker.replace(".T", "")
-    elif ticker.isdigit() and len(ticker) <= 5:
-        is_jp = True
-        code_for_irbank = ticker
+    eps: Optional[float] = None
+    bps: Optional[float] = None
+    eps_fwd: Optional[float] = None
+    per: Optional[float] = None
+    pbr: Optional[float] = None
+    per_fwd: Optional[float] = None
 
-    if is_jp:
-        # --- 日本株: IRBANK ---
-        if code_for_irbank is not None:
-            eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
-            # IRBANK の予想PERから予想EPSを逆算
-            if per_fwd not in (None, 0.0) and close > 0:
-                eps_fwd = close / per_fwd
-    else:
-        # --- 米国株など: FMP ---
-        fmp_key = None
-        try:
-            fmp_key = st.secrets["FMP_API_KEY"]
-        except Exception:
-            print("[FMP] st.secrets['FMP_API_KEY'] が設定されていません。US指標は取得しません。")
-
-        if fmp_key:
-            eps, bps, per_fwd, eps_fwd = get_us_fundamentals_fmp(
-                symbol=ticker,
-                price=close,
-                api_key=fmp_key,
-            )
+    if fmp_key:
+        eps, bps, eps_fwd, per, pbr, per_fwd = get_fundamentals_fmp(
+            symbol=ticker,
+            price=close,
+            api_key=fmp_key,
+        )
 
     return {
         "df": df,
@@ -361,9 +263,11 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        # IRBANK / FMP 系
+        # FMP 系
         "eps": eps,           # 実績EPS
         "bps": bps,           # 実績BPS
-        "per_fwd": per_fwd,   # 予想PER
         "eps_fwd": eps_fwd,   # 予想EPS
+        "per": per,           # 実績PER（close / eps）
+        "pbr": pbr,           # 実績PBR（close / bps）
+        "per_fwd": per_fwd,   # 予想PER（close / eps_fwd）
     }
