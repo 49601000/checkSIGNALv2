@@ -7,9 +7,13 @@ import requests
 from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
-import streamlit as st  # ← secrets から API キーを読む
+import streamlit as st
 
 IRBANK_BASE = "https://irbank.net/"
+FMP_BASE = "https://financialmodelingprep.com/api/v3"
+
+# Streamlit Secrets から API キー取得
+FMP_API_KEY: Optional[str] = st.secrets.get("FMP_API_KEY")
 
 
 # -----------------------------------------------------------
@@ -24,6 +28,16 @@ def convert_ticker(ticker: str) -> str:
     if ticker.isdigit() and len(ticker) <= 5 and not ticker.endswith(".T"):
         return ticker + ".T"
     return ticker
+
+
+def is_jpx_ticker(ticker: str) -> bool:
+    """東証銘柄かどうか（.T または数値コードとみなす簡易判定）"""
+    t = ticker.upper()
+    if t.endswith(".T"):
+        return True
+    if t.isdigit() and len(t) <= 5:
+        return True
+    return False
 
 
 # -----------------------------------------------------------
@@ -78,7 +92,7 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 
 
 # -----------------------------------------------------------
-# IRBANK から 実績EPS / BPS / PER予 を取得（日本株用）
+# IRBANK から 実績EPS / BPS / PER予 を取得（JPX用）
 # -----------------------------------------------------------
 def get_eps_bps_irbank(
     code: str,
@@ -113,7 +127,6 @@ def get_eps_bps_irbank(
         for _ in range(8):
             if cur is None:
                 break
-
             text = str(cur)
             m = re.search(r"([\d,]+(?:\.\d+)?)", text)
             if m:
@@ -121,9 +134,7 @@ def get_eps_bps_irbank(
                     return float(m.group(1).replace(",", ""))
                 except ValueError:
                     return None
-
             cur = cur.find_next(string=True)
-
         return None
 
     eps = (
@@ -136,70 +147,55 @@ def get_eps_bps_irbank(
         or extract_number_near("BPS（単）")
         or extract_number_near("BPS")
     )
+
     per_fwd = extract_number_near("PER予")
 
     return eps, bps, per_fwd
 
 
 # -----------------------------------------------------------
-# FMP から PER/PBR(TTM) を取得 → EPS/BPS を逆算（米国株用）
+# FMP から US 銘柄の EPS/BPS を取得（ratios-ttm 利用）
 # -----------------------------------------------------------
-def get_eps_bps_from_fmp_us(
+def get_us_eps_bps_from_fmp(
     symbol: str,
     close: float,
-) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+) -> Tuple[Optional[float], Optional[float]]:
     """
-    FMP /profile から
-      - priceEarningsRatioTTM
-      - priceToBookRatioTTM
-    を取り、それを使って EPS/BPS を逆算する。
-
-    戻り値: (eps, bps, per_ttm, pbr_ttm)
+    FMP /ratios-ttm から peTTM, pbTTM を取得し、
+    現在株価 close から EPS / BPS を逆算する。
     """
-    api_key = None
-    try:
-        api_key = st.secrets["FMP_API_KEY"]
-    except Exception:
-        pass
+    if not FMP_API_KEY:
+        print("[FMP] API key not set")
+        return None, None
 
-    if not api_key:
-        print("[FMP] API key not found in st.secrets['FMP_API_KEY']")
-        return None, None, None, None
+    url = f"{FMP_BASE}/ratios-ttm/{symbol}?apikey={FMP_API_KEY}"
 
-    url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey={api_key}"
     try:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         print(f"[FMP] request error ({symbol}): {e}")
-        return None, None, None, None
+        return None, None
 
-    if not isinstance(data, list) or not data:
-        return None, None, None, None
+    if not isinstance(data, list) or len(data) == 0:
+        print(f"[FMP] empty ratios data ({symbol}) -> {data}")
+        return None, None
 
-    prof = data[0] or {}
-    per_ttm = prof.get("priceEarningsRatioTTM")
-    pbr_ttm = prof.get("priceToBookRatioTTM")
+    item = data[0] or {}
+    pe_ttm = item.get("peTTM")
+    pb_ttm = item.get("pbTTM")
 
     eps = None
     bps = None
 
-    if per_ttm not in (None, 0) and close > 0:
-        try:
-            eps = close / float(per_ttm)
-        except Exception:
-            eps = None
+    if pe_ttm not in (None, 0, 0.0) and close > 0:
+        eps = close / pe_ttm
+    if pb_ttm not in (None, 0, 0.0) and close > 0:
+        bps = close / pb_ttm
 
-    if pbr_ttm not in (None, 0) and close > 0:
-        try:
-            bps = close / float(pbr_ttm)
-        except Exception:
-            bps = None
-
-    return eps, bps, (float(per_ttm) if per_ttm not in (None, 0) else None), (
-        float(pbr_ttm) if pbr_ttm not in (None, 0) else None
-    )
+    print(f"[FMP] {symbol} peTTM={pe_ttm}, pbTTM={pb_ttm}, eps={eps}, bps={bps}")
+    return eps, bps
 
 
 # -----------------------------------------------------------
@@ -214,9 +210,8 @@ def get_price_and_meta(
     株価データとメタ情報を取得して返す。
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
-    - 米国株コードなら FMP で PER/PBR(TTM) → EPS/BPS を逆算
-    - 日本株コードなら IRBANK で 実績EPS / BPS / PER予 を取得し、
-      そこから予想EPSも計算する。
+    - 日本株コードなら IRBANK で 実績EPS / BPS / PER予 を取得し、そこから予想EPSも計算
+    - それ以外（米国株など）は FMP から peTTM / pbTTM を取得して EPS/BPS を逆算
     """
     # --- 価格データ（yfinance.download）---
     try:
@@ -252,28 +247,25 @@ def get_price_and_meta(
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
-    # --- ファンダメンタル系 ---
+    # --- ファンダメンタル関連の初期値 ---
     eps: Optional[float] = None          # 実績EPS
     bps: Optional[float] = None          # 実績BPS
-    per_fwd: Optional[float] = None      # 予想PER（日本株のみ IRBANK）
-    eps_fwd: Optional[float] = None      # 予想EPS（日本株のみ）
+    per_fwd: Optional[float] = None      # PER予（JPXのみ）
+    eps_fwd: Optional[float] = None      # 予想EPS（JPXのみ）
 
-    # 日本株判定（末尾 .T or 数字だけ）
-    is_jpx = ticker.endswith(".T") or (ticker.isdigit() and len(ticker) <= 5)
-
-    if is_jpx:
-        # ---- JP: IRBANK ----
-        code_for_irbank = ticker.replace(".T", "")
+    # --- 日本株 (IRBANK) or 米株 (FMP) の分岐 ---
+    if is_jpx_ticker(ticker):
+        # "2801.T" -> "2801" に変換
+        code_for_irbank = ticker.replace(".T", "") if ticker.endswith(".T") else ticker
         eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
+
+        # 予想PERが取れていて株価も正なら、そこから予想EPSを逆算
         if per_fwd not in (None, 0.0) and close > 0:
             eps_fwd = close / per_fwd
+
     else:
-        # ---- US: FMP ----
-        # FMP は通常 "AAPL", "NVDA" などのシンボルをそのまま使う
-        symbol = ticker.split(".")[0]
-        eps, bps, per_ttm, pbr_ttm = get_eps_bps_from_fmp_us(symbol, close)
-        # per_ttm / pbr_ttm は今のところ UI では使わないが、
-        # 必要なら base dict に入れても OK（ここでは入れない）
+        # 米国銘柄など → FMP の ratios-ttm から EPS/BPS を逆算
+        eps, bps = get_us_eps_bps_from_fmp(ticker, close)
 
     return {
         "df": df,
@@ -284,9 +276,9 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        # ファンダメンタル（compute_indicators に渡す）
-        "eps": eps,
-        "bps": bps,
-        "per_fwd": per_fwd,
-        "eps_fwd": eps_fwd,
+        # IRBANK / FMP からのファンダメンタル
+        "eps": eps,           # 実績EPS
+        "bps": bps,           # 実績BPS
+        "per_fwd": per_fwd,   # JPX: PER予
+        "eps_fwd": eps_fwd,   # JPX: 予想EPS
     }
