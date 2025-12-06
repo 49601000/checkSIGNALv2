@@ -1,4 +1,3 @@
-# ui_components.py
 import streamlit as st
 
 from data_fetch import convert_ticker, get_price_and_meta
@@ -14,9 +13,18 @@ def render_app():
     setup_page()
 
     # ------------ Alpha Vantage API Key の存在チェック ------------
+    # .streamlit/secrets.toml に
+    # ALPHA_VANTAGE_API_KEY = "xxxxx"
+    # を設定しておくこと
     if "ALPHA_VANTAGE_API_KEY" not in st.secrets:
         st.error("ALPHA_VANTAGE_API_KEY が st.secrets に設定されていません。")
         st.stop()
+
+    # デバッグ用：APIキーが読めているか（不要ならコメントアウト）
+    # st.write(
+    #     "ALPHA_VANTAGE_API_KEY loaded?:",
+    #     "ALPHA_VANTAGE_API_KEY" in st.secrets,
+    # )
 
     # ------------ 入力 ------------
     user_input = st.text_input("ティッカーを入力（例：7203, 8306.T, AAPL）", value="")
@@ -27,6 +35,8 @@ def render_app():
 
     # ------------ データ取得 ------------
     try:
+        # 日本株 → IRBANK / yfinance
+        # 米国株 → Alpha Vantage / yfinance（data_fetch 側で判定）
         base = get_price_and_meta(ticker)
     except ValueError as e:
         st.error(str(e))
@@ -40,17 +50,18 @@ def render_app():
     low_52w = base["low_52w"]
     company_name = base["company_name"]
     dividend_yield = base["dividend_yield"]
-    eps = base.get("eps")
-    bps = base.get("bps")
-    eps_fwd = base.get("eps_fwd")
-    per_fwd = base.get("per_fwd")
 
-    # Q 用のファンダ
-    roe = base.get("roe")
-    roa = base.get("roa")
-    equity_ratio = base.get("equity_ratio")
+    # ファンダ系
+    eps = base.get("eps")             # 実績 EPS
+    bps = base.get("bps")             # 実績 BPS
+    eps_fwd = base.get("eps_fwd")     # 予想 EPS（あれば）
+    per_fwd = base.get("per_fwd")     # 予想 PER（あれば）
 
-    # ------------ テクニカル指標 + PER/PBR + Q/V/T ------------
+    roe = base.get("roe")             # ROE（%）
+    roa = base.get("roa")             # ROA（%）
+    equity_ratio = base.get("equity_ratio")  # 自己資本比率（%）
+
+    # ------------ テクニカル + QVT スコア計算 ------------
     try:
         tech = compute_indicators(
             df,
@@ -78,117 +89,90 @@ def render_app():
     else:
         price_color = "black"
 
+    # ------------ ヘッダー部分（現在価格 + PER/PBR + MA）------------
+    st.markdown("---")
+    st.markdown(f"## 📌 {ticker}（{company_name}）")
+
     # PER / PBR の文字列整形（None のときは "—"）
     per_val = tech.get("per")
     pbr_val = tech.get("pbr")
     per_str = f"{per_val:.2f}倍" if per_val is not None else "—"
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val is not None else "—"
 
-    # -------------------------------
-    # ① ヘッダー
-    # -------------------------------
-    st.markdown("---")
-    st.markdown(f"## 📌 {ticker}（{company_name}）")
-    st.markdown(
-        f"""
-**現在価格**: <span style='color:{price_color}; font-weight:bold;'>{close:.2f}</span>  
-（前日終値: {previous_close:.2f}）  
+    # 予想 PER（compute_indicators 側で per_fwd を計算済み）
+    per_fwd_val = tech.get("per_fwd")
+    per_fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
 
-**PER**: {per_str} ｜ **PBR**: {pbr_str}
-        """,
-        unsafe_allow_html=True,
+    html_header = (
+        f"**現在価格**: "
+        f"<span style='color:{price_color}; font-weight:bold;'>{close:.2f}</span>  <br>"
+        f"（前日終値: {previous_close:.2f}）  <br><br>"
+        f"**PER**: {per_str} ｜ **PBR**: {pbr_str}  <br><br>"
+        f"**25MA**: {tech['ma25']:.2f} {tech['arrow25']} ｜ "
+        f"**50MA**: {tech['ma50']:.2f} {tech['arrow50']} ｜ "
+        f"**75MA**: {tech['ma75']:.2f} {tech['arrow75']}"
     )
+    st.markdown(html_header, unsafe_allow_html=True)
 
-    # -------------------------------
-    # ② 総合 QVT スコア
-    # -------------------------------
-    q_score = tech["q_score"]
-    v_score = tech["v_score"]
-    t_score = tech["t_score"]
-    qvt_total = tech["qvt_total"]
-
-    st.markdown("### 🎯 総合 QVT スコア")
-
-    st.metric("総合スコア (Q+V+T)", f"{qvt_total:.1f} / 100")
-
-    col_q, col_v, col_t = st.columns(3)
-    col_q.metric("Q: ビジネスの質", f"{q_score:.1f} / 100")
-    col_v.metric("V: バリュエーション", f"{v_score:.1f} / 100")
-    col_t.metric("T: タイミング", f"{t_score:.1f} / 100")
-
-    # -------------------------------
-    # ③ Q: ビジネスの質
-    # -------------------------------
-    st.markdown("---")
-    st.markdown("### 🧱 Q: ビジネスの質（ROE / ROA / 自己資本比率）")
-
-    q_roe = tech.get("roe")
-    q_roa = tech.get("roa")
-    q_eq = tech.get("equity_ratio")
-
-    q_roe_str = f"{q_roe:.1f}%" if q_roe is not None else "—"
-    q_roa_str = f"{q_roa:.1f}%" if q_roa is not None else "—"
-    q_eq_str = f"{q_eq:.1f}%" if q_eq is not None else "—"
-
+    # ------------ RSI / BB ------------
     st.markdown(
         f"""
-| 指標 | 数値 | 補足 |
-|---|---|---|
-| ROE | {q_roe_str} | 株主資本に対する利益率 |
-| ROA | {q_roa_str} | 総資産に対する利益率 |
-| 自己資本比率 | {q_eq_str} | 財務の健全性 |
-| **Qスコア** | **{q_score:.1f} / 100** |  |
-"""
-    )
-
-    # -------------------------------
-    # ④ V: バリュエーション
-    # -------------------------------
-    st.markdown("---")
-    st.markdown("### 💰 V: バリュエーション（値札の妥当性）")
-
-    div_yield = tech.get("dividend_yield")
-
-    div_str = f"{div_yield:.2f}%" if div_yield is not None else "—"
-
-    st.markdown(
-        f"""
-| 指標 | 数値 | 補足 |
-|---|---|---|
-| PER | {per_str} | 利益に対する株価の倍率 |
-| PBR | {pbr_str} | 純資産に対する株価の倍率 |
-| 予想配当利回り | {div_str} | 過去1年配当から算出 |
-| **Vスコア** | **{v_score:.1f} / 100** |  |
-"""
-    )
-
-    # -------------------------------
-    # ⑤ T: タイミング & テクニカル
-    # -------------------------------
-    st.markdown("---")
-    st.markdown("### 📈 T: タイミング（テクニカル状況）")
-
-    st.markdown(
-        f"""
-**25MA**: {tech['ma25']:.2f} {tech['arrow25']} ｜ 
-**50MA**: {tech['ma50']:.2f} {tech['arrow50']} ｜ 
-**75MA**: {tech['ma75']:.2f} {tech['arrow75']}  
-**RSI**: {tech["rsi"]:.1f} ｜ **BB判定**: {tech["bb_icon"]} {tech["bb_text"]}  
+**RSI**: {tech["rsi"]:.1f} ｜ **BB判定**: {tech["bb_icon"]} {tech["bb_text"]}
         """
     )
 
-    t_mode = tech.get("t_mode", "trend")
-    mode_label = "順張りモード" if t_mode == "trend" else "逆張りモード"
+    # 高値掴みアラート
+    if tech.get("high_price_alert"):
+        st.warning("⚠️ 高値掴みリスク（高値圏に近い水準です）")
 
-    st.markdown(
-        f"**タイミングスコア (T)**: **{t_score:.1f} / 100** （{mode_label}）"
-    )
+    # 配当利回り（取れているときだけ）
+    if dividend_yield is not None:
+        st.markdown(f"**予想配当利回り（過去1年ベース）**: {dividend_yield:.2f}%")
 
     # 押し目シグナル
-    st.markdown(f"#### {tech['signal_icon']} {tech['signal_text']}")
+    st.markdown(f"### {tech['signal_icon']} {tech['signal_text']}")
     st.progress(tech["signal_strength"] / 3)
 
-    # ------------ 裁量買いレンジ（順張り or 逆張り）------------
+    # ================================
+    # 🔷 Q / V / T / QVT セクション
+    # ================================
+    st.markdown("---")
+    st.markdown("### 🧩 QVTスコア（質×値札×タイミング）")
+
+    q_score = tech.get("q_score", 0.0)
+    v_score = tech.get("v_score", 0.0)
+    t_score = tech.get("t_score", 0.0)
+    qvt_score = tech.get("qvt_score", 0.0)
+    timing_label = tech.get("timing_label", "")
+
+    col_q, col_v, col_t, col_total = st.columns(4)
+
+    with col_q:
+        st.metric("Q（ビジネスの質）", f"{q_score:.1f} / 100")
+        st.caption(
+            f"ROE: {roe:.1f}%｜ROA: {roa:.1f}%｜自己資本比率: {equity_ratio:.1f}%"
+            if (roe is not None and roa is not None and equity_ratio is not None)
+            else "ROE / ROA / 自己資本比率の一部または全部が取得できていません"
+        )
+
+    with col_v:
+        st.metric("V（バリュエーション）", f"{v_score:.1f} / 100")
+        st.caption(
+            f"PER: {per_str}｜PBR: {pbr_str}｜利回り: "
+            + (f"{dividend_yield:.2f}%" if dividend_yield is not None else "—")
+        )
+
+    with col_t:
+        st.metric("T（タイミング）", f"{t_score:.1f} / 100")
+        st.caption(f"タイミング評価: {timing_label}")
+
+    with col_total:
+        st.metric("QVT総合スコア", f"{qvt_score:.1f} / 100")
+        st.caption("Q・V・T の単純平均")
+
+    # ================================
+    # 📈 裁量買いレンジ（既存ロジック）
+    # ================================
     st.markdown("---")
 
     # 順張り（25 > 50 > 75）
@@ -205,7 +189,7 @@ def render_app():
 |---|---|---|
 | 中期トレンド | 25MA ＞ 50MA ＞ 75MA | {"○" if tech["trend_conditions"][0] else "×"} |
 | 短期傾向 | MA25 が横ばい〜緩やか上昇 | {"○" if tech["trend_conditions"][1] else "×"} |
-| 割高否定 | ブルスコア（highprice） | {tech["highprice_score"]:.1f} |
+| 割高否定 | ブルスコア（高値否定スコア） | {tech["highprice_score"]:.1f} |
 | 中心価格 | 25MA と 50MA の平均 | {center_price:.2f} |
 | 上側許容 | ×1.03 | {upper_price:.2f} |
 | 下側許容 | ×0.95 または BB-1σ | {lower_price:.2f} |
@@ -226,7 +210,7 @@ def render_app():
 |---|---|---|
 | 中期トレンド | 下降 or 横ばい | {"○" if tech["contrarian_conditions"][0] else "×"} |
 | 短期傾向 | MA25 が下降 | {"○" if tech["contrarian_conditions"][1] else "×"} |
-| 割安判定 | ベアスコア（low_score） | {tech["low_score"]:.1f} |
+| 割安判定 | ベアスコア（割安スコア） | {tech["low_score"]:.1f} |
 | 中心価格 | 25MA と BB−1σ の平均 | {center_price:.2f} |
 | 上側許容 | ×1.08 | {upper_price:.2f} |
 | 下側許容 | ×0.97 | {lower_price:.2f} |
