@@ -68,23 +68,26 @@ def render_app():
     st.markdown("---")
     st.markdown(f"## 📌 {ticker}（{company_name}）")
 
-    # PER / PBR の文字列整形（None のときは "—"）
+        # PER / PBR の文字列整形（None のときは "—"）
     per_val = tech.get("per")
     pbr_val = tech.get("pbr")
     per_str = f"{per_val:.2f}倍" if per_val is not None else "—"
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val is not None else "—"
-    per_fwd_val = tech.get("per_fwd")
+
+    # 予想 PER（テクニカル側で per_fwd を計算済み）
+    per_fwd_val = tech.get("per_fwd")   # ← キー名を修正
+    per_fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
+
+    # 予想 PBR はまだロジックを作っていないので基本は None のまま
     pbr_fwd_val = tech.get("pbr_fwd")
-    per__fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
     pbr_fwd_str = f"{pbr_fwd_val:.2f}倍" if pbr_fwd_val is not None else "—"
 
-    # HTML 部分を 1 本の文字列として組み立てる
     html_header = (
         f"**現在価格**: "
         f"<span style='color:{price_color}; font-weight:bold;'>{close:.2f}</span>  <br>"
         f"（前日終値: {previous_close:.2f}）  <br><br>"
         f"**PER**: {per_str} ｜ **PBR**: {pbr_str}  <br><br>"
-        f"**予想PER**: {per_str} ｜ **予想PBR**: {pbr_str}  <br><br>"
+        f"**予想PER**: {per_fwd_str} ｜ **予想PBR**: {pbr_fwd_str}  <br><br>"
         f"**25MA**: {tech['ma25']:.2f} {tech['arrow25']} ｜ "
         f"**50MA**: {tech['ma50']:.2f} {tech['arrow50']} ｜ "
         f"**75MA**: {tech['ma75']:.2f} {tech['arrow75']}"
