@@ -1,136 +1,11 @@
+# indicators.py
 from typing import Optional
 import pandas as pd
 
 
-# ===========================================================
-# 小ヘルパー（スコアリング）
-# ===========================================================
-
-def _score_roe(roe: Optional[float]) -> Optional[float]:
-    """ROE を 0〜100 点にスコアリング"""
-    if roe is None:
-        return None
-    if roe < 0:
-        return 0
-    if roe < 5:
-        return 20
-    if roe < 10:
-        return 40
-    if roe < 15:
-        return 60
-    if roe < 20:
-        return 80
-    return 100  # 20%以上
-
-
-def _score_roa(roa: Optional[float]) -> Optional[float]:
-    """ROA を 0〜100 点にスコアリング（ROEより低めに見る）"""
-    if roa is None:
-        return None
-    if roa < 0:
-        return 0
-    if roa < 2:
-        return 20
-    if roa < 4:
-        return 40
-    if roa < 6:
-        return 60
-    if roa < 8:
-        return 80
-    return 100  # 8%以上
-
-
-def _score_equity_ratio(ratio: Optional[float]) -> Optional[float]:
-    """自己資本比率（%）を 0〜100 点にスコアリング"""
-    if ratio is None:
-        return None
-    if ratio < 10:
-        return 10
-    if ratio < 20:
-        return 30
-    if ratio < 30:
-        return 50
-    if ratio < 40:
-        return 70
-    if ratio < 60:
-        return 85
-    return 100  # 60%以上（かなり堅い）
-
-
-def _score_per(per: Optional[float]) -> Optional[float]:
-    """PER を 0〜100 点にスコアリング（安いほど高得点）"""
-    if per is None or per <= 0:
-        return None
-    if per < 8:
-        return 100
-    if per < 12:
-        return 85
-    if per < 18:
-        return 70
-    if per < 25:
-        return 55
-    if per < 40:
-        return 35
-    return 15  # 40倍以上はかなり割高
-
-
-def _score_pbr(pbr: Optional[float]) -> Optional[float]:
-    """PBR を 0〜100 点にスコアリング（1倍前後を高評価、極端な高PBRは減点）"""
-    if pbr is None or pbr <= 0:
-        return None
-    if pbr < 0.8:
-        return 100
-    if pbr < 1.2:
-        return 85
-    if pbr < 2.0:
-        return 65
-    if pbr < 3.0:
-        return 45
-    if pbr < 5.0:
-        return 25
-    return 10  # 5倍以上
-
-
-def _score_dividend_yield(yld: Optional[float]) -> Optional[float]:
-    """配当利回り（%）を 0〜100 点にスコアリング"""
-    if yld is None or yld < 0:
-        return None
-    if yld < 1.0:
-        return 20
-    if yld < 2.0:
-        return 40
-    if yld < 3.5:
-        return 60
-    if yld < 5.0:
-        return 80
-    if yld < 8.0:
-        return 90
-    # 8%以上は減配リスクもあるので少し減点
-    return 60
-
-
-def _average_scores(values):
-    """None を除外して平均をとる。全て None の場合は None を返す。"""
-    valid = [v for v in values if v is not None]
-    if not valid:
-        return None
-    return sum(valid) / len(valid)
-
-
-def _normalize_total(q: Optional[float], v: Optional[float], t: Optional[float]) -> float:
-    """
-    総合スコア用：Q/V/T が None の場合は 50 点（中立）として扱い、3つの平均を返す。
-    """
-    def _val(x):
-        return 50.0 if x is None else float(x)
-
-    return (_val(q) + _val(v) + _val(t)) / 3.0
-
-
-# ===========================================================
-# 既存ヘルパー
-# ===========================================================
-
+# ==========================
+# 共通ユーティリティ
+# ==========================
 def slope_arrow(series: pd.Series, window: int = 3) -> str:
     """MA の向きを矢印で返す（↗ / ↘ / →）"""
     series = series.dropna()
@@ -162,20 +37,22 @@ def judge_bb_signal(price, bb1, bb2, bbm1, bbm2):
 
 def is_high_price_zone(price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w):
     """
-    割高否定スコア（高いほど『割高ではない』方向）
-    ※現状はテクニカル中心。per/pbr は未使用。
+    割高否定スコア（高いほど『割高ではない』方向） 0〜70点
     """
     score = 0
+    # 株価が25・50MAより +10% 未満
     if price <= ma25 * 1.10 and price <= ma50 * 1.10:
         score += 20
+    # BB +1σ 以下
     if price <= bb_upper1:
         score += 20
+    # RSI < 70
     if rsi < 70:
         score += 15
+    # 52週高値の 95% 未満
     if high_52w != 0 and price < high_52w * 0.95:
         score += 15
-    # 将来 per / pbr ロジックを足す余地あり
-    return score
+    return score  # 最大 70 点想定
 
 
 def is_low_price_zone(
@@ -190,22 +67,25 @@ def is_low_price_zone(
     low_52w,
 ):
     """
-    割安スコア（高いほど『割安』方向）
-    ※現状はテクニカル中心。per/pbr は未使用。
+    割安スコア（高いほど『割安』方向）0〜85点
     """
     score = 0
+    # 株価が25MA/50MAより −10%以上
     if price < ma25 * 0.90 and price < ma50 * 0.90:
         score += 20
+    # BB -1σ 以下
     if price < bb_lower1:
         score += 15
+    # BB -2σ 以下
     if price < bb_lower2:
         score += 20
+    # RSI < 30
     if rsi < 30:
         score += 15
+    # 52週安値の 105% 以内
     if price <= low_52w * 1.05:
         score += 15
-    # 将来 per / pbr ロジックを足す余地あり
-    return score
+    return score  # 最大 85 点想定
 
 
 def is_flat_ma(ma25, ma50, ma75, tolerance=0.03):
@@ -262,28 +142,246 @@ def judge_signal(
         return "押し目シグナルなし", "🟢", 0
 
 
-# ===========================================================
-# メイン：テクニカル & QVT スコア計算
-# ===========================================================
+# ==========================
+# Q: ビジネスの質スコア
+# ==========================
+def _score_quality(
+    roe: Optional[float],
+    roa: Optional[float],
+    equity_ratio: Optional[float],
+) -> dict:
+    """
+    Q: ROE / ROA / 自己資本比率から 0〜100点の「ビジネスの質」スコアを算出
+    ROE: 最大50点, ROA: 最大30点, 自己資本比率: 最大20点
+    """
+    # --- ROE (％) 0〜50点 ---
+    roe_score = 0.0
+    if roe is not None:
+        if roe <= 0:
+            roe_score = 0
+        elif roe < 5:
+            roe_score = 10
+        elif roe < 10:
+            roe_score = 20
+        elif roe < 15:
+            roe_score = 30
+        elif roe < 20:
+            roe_score = 40
+        else:
+            roe_score = 50  # 20%以上は満点
 
+    # --- ROA (％) 0〜30点 ---
+    roa_score = 0.0
+    if roa is not None:
+        if roa <= 0:
+            roa_score = 0
+        elif roa < 2:
+            roa_score = 10
+        elif roa < 5:
+            roa_score = 20
+        elif roa < 8:
+            roa_score = 25
+        else:
+            roa_score = 30  # 8%以上は満点
+
+    # --- 自己資本比率 (％) 0〜20点 ---
+    eq_score = 0.0
+    if equity_ratio is not None:
+        if equity_ratio < 20:
+            eq_score = 0
+        elif equity_ratio < 30:
+            eq_score = 5
+        elif equity_ratio < 40:
+            eq_score = 10
+        elif equity_ratio < 50:
+            eq_score = 15
+        else:
+            eq_score = 20  # 50%以上は満点
+
+    q_score = roe_score + roa_score + eq_score
+    q_score = max(0.0, min(100.0, q_score))
+
+    return {
+        "q_score": q_score,
+        "q_roe_score": roe_score,
+        "q_roa_score": roa_score,
+        "q_equity_score": eq_score,
+    }
+
+
+# ==========================
+# V: バリュエーションスコア
+# ==========================
+def _score_valuation(
+    per: Optional[float],
+    pbr: Optional[float],
+    dividend_yield: Optional[float],
+) -> dict:
+    """
+    PER / PBR / 配当利回りから 0〜100点のバリュエーションスコアを算出
+    PER: 最大30点, PBR: 最大30点, 配当: 最大40点
+    """
+    # --- PER 0〜30点 ---
+    per_score = 0.0
+    if per is not None and per > 0:
+        if per < 8:
+            per_score = 30
+        elif per < 15:
+            per_score = 25
+        elif per < 25:
+            per_score = 15
+        elif per < 40:
+            per_score = 5
+        else:
+            per_score = 0
+    # None の場合は 0点
+
+    # --- PBR 0〜30点 ---
+    pbr_score = 0.0
+    if pbr is not None and pbr > 0:
+        if pbr < 1.0:
+            pbr_score = 30
+        elif pbr < 2.0:
+            pbr_score = 20
+        elif pbr < 3.0:
+            pbr_score = 10
+        else:
+            pbr_score = 0
+
+    # --- 配当利回り 0〜40点 ---
+    div_score = 0.0
+    if dividend_yield is not None and dividend_yield >= 0:
+        if dividend_yield >= 4.0:
+            div_score = 40
+        elif dividend_yield >= 2.0:
+            div_score = 25
+        elif dividend_yield >= 1.0:
+            div_score = 10
+        else:
+            div_score = 0
+
+    v_score = per_score + pbr_score + div_score
+    v_score = max(0.0, min(100.0, v_score))
+
+    return {
+        "v_score": v_score,
+        "v_per_score": per_score,
+        "v_pbr_score": pbr_score,
+        "v_div_score": div_score,
+    }
+
+
+# ==========================
+# T: タイミングスコア
+# ==========================
+def _score_timing_trend(
+    price: float,
+    ma25: float,
+    ma50: float,
+    rsi: float,
+    highprice_score: float,
+) -> dict:
+    """
+    順張りモード用: highprice_score + MA乖離 + RSI から T を算出
+    """
+    # 1. 安全度（割高否定）0〜50
+    safety = min(highprice_score, 70.0) / 70.0 * 50.0
+
+    # 2. 位置（25MA からの乖離）0〜30
+    dist = abs(price - ma25) / ma25 if ma25 > 0 else 1.0
+    if dist <= 0.02:       # 2%以内 → ベスト
+        place = 30.0
+    elif dist <= 0.05:     # 5%以内 → 許容
+        place = 15.0
+    else:                  # それ以上乖離 → タイミング微妙
+        place = 0.0
+
+    # 3. 勢い（RSI の心地よさ）0〜20
+    if 45.0 <= rsi <= 60.0:
+        momentum = 20.0
+    elif 40.0 <= rsi <= 65.0:
+        momentum = 10.0
+    else:
+        momentum = 0.0
+
+    t_score = safety + place + momentum
+    t_score = max(0.0, min(100.0, t_score))
+
+    return {
+        "t_score": t_score,
+        "t_mode": "trend",
+        "t_safety": safety,
+        "t_placement": place,
+        "t_momentum": momentum,
+    }
+
+
+def _score_timing_contrarian(
+    price: float,
+    ma25: float,
+    ma50: float,
+    bb_lower1: float,
+    bb_lower2: float,
+    rsi: float,
+    low_score: float,
+) -> dict:
+    """
+    逆張りモード用: low_score + 価格の位置 + RSI から T を算出
+    """
+    # 1. 安全度（下値余地の小ささ）0〜50
+    safety = min(low_score, 85.0) / 85.0 * 50.0
+
+    # 2. 位置（どれだけ押し目ゾーンか）0〜30
+    if price <= bb_lower2:
+        place = 30.0   # −2σ 以下 → 強い押し目
+    elif price <= bb_lower1:
+        place = 20.0   # −1σ 以下
+    elif price < ma25 and price < ma50:
+        place = 10.0   # MA の下だが BB 圏内
+    else:
+        place = 0.0
+
+    # 3. 勢い（リバウンド初動かどうか）0〜20
+    if rsi <= 25.0:
+        momentum = 5.0   # まだ売られすぎ
+    elif 25.0 < rsi <= 40.0:
+        momentum = 20.0  # 売られすぎ→戻り初動
+    else:
+        momentum = 0.0
+
+    t_score = safety + place + momentum
+    t_score = max(0.0, min(100.0, t_score))
+
+    return {
+        "t_score": t_score,
+        "t_mode": "contrarian",
+        "t_safety": safety,
+        "t_placement": place,
+        "t_momentum": momentum,
+    }
+
+
+# ==========================
+# メイン: 各種指標 + QVT スコア
+# ==========================
 def compute_indicators(
     df: pd.DataFrame,
     close_col: str,
     high_52w: float,
     low_52w: float,
-    ticker: Optional[str] = None,  # 将来拡張用
+    ticker: Optional[str] = None,  # いまは未使用。将来拡張用に残しておく。
     eps: Optional[float] = None,
     bps: Optional[float] = None,
     eps_fwd: Optional[float] = None,
     per_fwd: Optional[float] = None,
-    roa: Optional[float] = None,
     roe: Optional[float] = None,
-    equity_ratio: Optional[float] = None,      # 自己資本比率（%）
-    dividend_yield: Optional[float] = None,    # 予想配当利回り（%）
+    roa: Optional[float] = None,
+    equity_ratio: Optional[float] = None,
+    dividend_yield: Optional[float] = None,
 ):
     """
-    df に各種テクニカル指標を追加し、判定に必要な値と
-    Q（ビジネスの質）/ V（バリュ）/ T（タイミング）のスコアを返す。
+    df に各種テクニカル指標を追加し、判定に必要な値＆
+    Q/V/T スコアをまとめて返す。
     """
     # 終値（最新）
     price = float(df[close_col].iloc[-1])
@@ -386,7 +484,7 @@ def compute_indicators(
         low_52w,
     )
 
-    # === 順張り・逆張りスコア（元のブル／ベアスコア） ===
+    # === 順張り・逆張りスコア（元々のブル／ベアスコア） ===
     highprice_score = is_high_price_zone(
         price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w
     )
@@ -402,32 +500,6 @@ def compute_indicators(
         low_52w,
     )
 
-    # === 順張り/逆張りモード判定 ===
-    is_trend_mode = ma75 < ma50 < ma25  # 25 > 50 > 75 なら順張りモード
-
-    # === T スコア（タイミング）===
-    # 順張り時：highprice_score を採用（割高否定スコア）
-    # 逆張り時：low_score を採用（割安スコア）
-    t_raw: Optional[float]
-    t_max: float
-    t_mode: str
-
-    if is_trend_mode:
-        t_raw = highprice_score
-        t_max = 70.0   # highprice_score の理論最大値
-        t_mode = "trend"
-    else:
-        t_raw = low_score
-        t_max = 85.0   # low_score の理論最大値
-        t_mode = "contrarian"
-
-    t_score: Optional[float]
-    if t_raw is None or t_max <= 0:
-        t_score = None
-    else:
-        t_score = max(0.0, min(100.0, t_raw / t_max * 100.0))
-
-    # === トレンド条件 / 逆張り条件（従来ロジック）===
     trend_conditions = [
         ma75 < ma50 < ma25,
         is_flat_or_gentle_up,
@@ -454,21 +526,38 @@ def compute_indicators(
         "買い候補として非常に魅力的です。",
     ][contr_ok]
 
-    # === Q（ビジネスの質）スコア ===
-    roe_score = _score_roe(roe)
-    roa_score = _score_roa(roa)
-    equity_score = _score_equity_ratio(equity_ratio)
-    q_score = _average_scores([roe_score, roa_score, equity_score])
+    # ==========================
+    # Q / V / T スコアの算出
+    # ==========================
+    q_info = _score_quality(roe=roe, roa=roa, equity_ratio=equity_ratio)
+    v_info = _score_valuation(per=per, pbr=pbr, dividend_yield=dividend_yield)
 
-    # === V（バリュエーション）スコア ===
-    per_score = _score_per(per)
-    pbr_score = _score_pbr(pbr)
-    div_score = _score_dividend_yield(dividend_yield)
-    v_score = _average_scores([per_score, pbr_score, div_score])
+    # T は「順張り/逆張り」で場合分け
+    if trend_conditions[0]:
+        t_info = _score_timing_trend(
+            price=price,
+            ma25=ma25,
+            ma50=ma50,
+            rsi=rsi,
+            highprice_score=highprice_score,
+        )
+    else:
+        t_info = _score_timing_contrarian(
+            price=price,
+            ma25=ma25,
+            ma50=ma50,
+            bb_lower1=bb_lower1,
+            bb_lower2=bb_lower2,
+            rsi=rsi,
+            low_score=low_score,
+        )
 
-    # === 総合 QVT スコア ===
-    total_qvt_score = _normalize_total(q_score, v_score, t_score)
+    q_score = q_info["q_score"]
+    v_score = v_info["v_score"]
+    t_score = t_info["t_score"]
+    qvt_total = (q_score + v_score + t_score) / 3.0
 
+    # 返却
     return {
         "df": df,
         "df_valid": df_valid,
@@ -495,36 +584,26 @@ def compute_indicators(
         "signal_strength": signal_strength,
         "highprice_score": highprice_score,
         "low_score": low_score,
-        "t_score": t_score,
-        "t_mode": t_mode,  # "trend" or "contrarian"
         "trend_conditions": trend_conditions,
         "trend_comment": trend_comment,
         "contrarian_conditions": contrarian_conditions,
         "contr_comment": contr_comment,
-        # ファンダメンタル
         "eps": eps,
         "bps": bps,
         "per": per,
         "pbr": pbr,
         "eps_fwd": eps_fwd,
         "per_fwd": per_fwd_calc,
-        "roa": roa,
+        # Q
         "roe": roe,
+        "roa": roa,
         "equity_ratio": equity_ratio,
+        **q_info,
+        # V
         "dividend_yield": dividend_yield,
-        # Q / V / T スコア
-        "q_score": q_score,
-        "v_score": v_score,
-        "total_qvt_score": total_qvt_score,
-        # 内訳（UIで詳細を出したいとき用）
-        "q_subscores": {
-            "roe_score": roe_score,
-            "roa_score": roa_score,
-            "equity_ratio_score": equity_score,
-        },
-        "v_subscores": {
-            "per_score": per_score,
-            "pbr_score": pbr_score,
-            "dividend_yield_score": div_score,
-        },
+        **v_info,
+        # T
+        **t_info,
+        # 総合
+        "qvt_total": qvt_total,
     }
