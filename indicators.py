@@ -1,172 +1,252 @@
-# data_fetch.py
-import yfinance as yf
+# indicators.py
 import pandas as pd
-from datetime import datetime, timedelta
-import requests
-from bs4 import BeautifulSoup
-from functools import lru_cache
-import re
 
 
-def convert_ticker(ticker: str) -> str:
+def slope_arrow(series: pd.Series, window: int = 3) -> str:
+    if len(series.dropna()) < window + 1:
+        return "→"
+    recent = series.dropna().iloc[-window:]
+    diff = recent.iloc[-1] - recent.iloc[0]
+    if diff > 0:
+        return "↗"
+    elif diff < 0:
+        return "↘"
+    else:
+        return "→"
+
+
+def judge_bb_signal(price, bb1, bb2, bbm1, bbm2):
+    if price >= bb2:
+        return "非常に割高（+2σ以上）", "🔥", 3
+    elif price >= bb1:
+        return "やや割高（+1σ以上）", "📈", 2
+    elif price <= bbm2:
+        return "過度に売られすぎ（-2σ以下）", "🧊", 3
+    elif price <= bbm1:
+        return "売られ気味（-1σ以下）", "📉", 2
+    else:
+        return "平均圏（±1σ内）", "⚪️", 1
+
+
+def is_high_price_zone(price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w):
     """
-    日本株コードの場合に自動で .T を付与。
-    例: "7203" -> "7203.T"
+    割高否定スコア（高いほど『割高ではない』方向）
+
+    ※ per, pbr は今のところスコアに使っていないが、
+      将来ロジック追加するために引数だけ受け取っている。
     """
-    ticker = ticker.strip().upper()
-    if ticker.isdigit() and len(ticker) <= 5 and not ticker.endswith(".T"):
-        return ticker + ".T"
-    return ticker
+    score = 0
+    if price <= ma25 * 1.10 and price <= ma50 * 1.10:
+        score += 20
+    if price <= bb_upper1:
+        score += 20
+    if rsi < 70:
+        score += 15
+    if high_52w != 0 and price < high_52w * 0.95:
+        score += 15
+    return score
 
 
-def _compute_dividend_yield_from_df(df: pd.DataFrame, close_col: str, close: float):
+def is_low_price_zone(price, ma25, ma50, bb_lower1, bb_lower2, rsi, per, pbr, low_52w):
     """
-    yf.download(..., actions=True) で付いてくる Dividends 列から
-    過去1年分の配当を集計して利回り（%）を計算。
+    割安スコア（高いほど『割安』方向）
+
+    ※ こちらも per, pbr は現段階では未使用。
     """
-    # Dividends 列を探す（MultiIndex flatten 済み想定）
-    div_col = next((c for c in df.columns if "Dividends" in c), None)
-    if div_col is None or close <= 0:
-        return None
-
-    divs = df[div_col]
-    if not isinstance(divs, pd.Series) or divs.empty:
-        return None
-
-    # index を datetime にそろえる
-    divs.index = pd.to_datetime(divs.index, errors="coerce")
-    divs = divs.dropna()
-
-    # タイムゾーン除去
-    try:
-        if getattr(divs.index, "tz", None) is not None:
-            divs.index = divs.index.tz_localize(None)
-    except Exception:
-        pass
-
-    one_year_ago = datetime.now() - timedelta(days=365)
-    one_year_ago = one_year_ago.replace(tzinfo=None)
-
-    last_year_divs = divs[divs.index >= one_year_ago]
-    if last_year_divs.empty:
-        return None
-
-    annual_div = float(last_year_divs.sum())
-    return (annual_div / close) * 100.0 if close > 0 else None
+    score = 0
+    if price < ma25 * 0.90 and price < ma50 * 0.90:
+        score += 20
+    if price < bb_lower1:
+        score += 15
+    if price < bb_lower2:
+        score += 20
+    if rsi < 30:
+        score += 15
+    if price <= low_52w * 1.05:
+        score += 15
+    return score
 
 
-@lru_cache(maxsize=256)
-def get_eps_bps_irbank(code: str):
+def is_flat_ma(ma25, ma50, ma75, tolerance=0.03):
+    ma_values = [ma25, ma50, ma75]
+    ma_max = max(ma_values)
+    ma_min = min(ma_values)
+    return (ma_max - ma_min) / ma_max <= tolerance
+
+
+def judge_signal(price, ma25, ma50, ma75, bb_lower1, bb_upper1, bb_lower2,
+                 rsi, high_52w, low_52w):
+
+    if rsi is None:
+        return "RSI不明", "⚪️", 0
+
+    # --- 強い押し目（バーゲン） ---
+    if price <= ma75 and rsi < 40 and price <= bb_lower1:
+        return "バーゲン（強い押し目）", "🔴", 3
+
+    # --- そこそこ押し目 ---
+    elif (price <= ma75 and price < bb_lower1) or (rsi < 30 and price < bb_lower1):
+        return "そこそこ押し目", "🟠", 2
+
+    # --- 軽い押し目 ---
+    elif price < ma25 * 0.97 and rsi < 37.5 and price <= bb_lower1:
+        return "軽い押し目", "🟡", 1
+
+    # --- 🔥 高値圏（要注意！） ---
+    elif is_high_price_zone(price, ma25, ma50, bb_upper1, rsi,
+                            None, None, high_52w) <= 40:
+        return "高値圏（要注意！）", "🔥", 0
+
+    # --- 押し目なし ---
+    else:
+        return "押し目シグナルなし", "🟢", 0
+
+
+def compute_indicators(df: pd.DataFrame, close_col: str,
+                       high_52w: float, low_52w: float,
+                       eps: float | None = None,
+                       bps: float | None = None):
     """
-    IRBANKから EPS（連）/ BPS（連） を1回だけ取得する。
-    code: '7203' のような4桁コード
+    df に各種テクニカル指標を追加し、判定に必要な値をまとめて返す。
+    ここで EPS/BPS から PER/PBR を計算する。
     """
-    url = f"https://irbank.net/{code}"
-    try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-    except Exception:
-        return None, None
+    # 終値（最新）
+    price = float(df[close_col].iloc[-1])
 
-    soup = BeautifulSoup(res.text, "html.parser")
+    # MA
+    df["25MA"] = df[close_col].rolling(25).mean()
+    df["50MA"] = df[close_col].rolling(50).mean()
+    df["75MA"] = df[close_col].rolling(75).mean()
 
-    def _find_number_after(label: str):
-        # "EPS（連）" などの文字列を含むタグを探す
-        tag = soup.find(string=lambda s: s and label in s)
-        if not tag:
-            return None
-        # 次に出てくる「数字を含むテキスト」を拾う
-        next_text = tag.find_next(string=lambda s: s and any(ch.isdigit() for ch in s))
-        if not next_text:
-            return None
-        text = next_text.strip()
-        m = re.search(r"([\d,]+(?:\.\d+)?)", text)
-        if not m:
-            return None
-        return float(m.group(1).replace(",", ""))
+    # ボリンジャーバンド
+    df["20MA"] = df[close_col].rolling(20).mean()
+    df["20STD"] = df[close_col].rolling(20).std()
+    df["BB_+1σ"] = df["20MA"] + df["20STD"]
+    df["BB_+2σ"] = df["20MA"] + 2 * df["20STD"]
+    df["BB_-1σ"] = df["20MA"] - df["20STD"]
+    df["BB_-2σ"] = df["20MA"] - 2 * df["20STD"]
 
-    eps = _find_number_after("EPS（連）")
-    bps = _find_number_after("BPS（連）")
-    return eps, bps
+    # RSI
+    delta = df[close_col].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean().replace(0, 1e-10)
+    df["RSI"] = 100 - (100 / (1 + (avg_gain / avg_loss)))
 
+    df_valid = df.dropna()
+    if df_valid.empty or len(df_valid) < 5:
+        raise ValueError("テクニカル指標を計算するためのデータが不足しています。")
 
-def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
-    """
-    yfinance.info から銘柄名を取得。なければティッカーで代用。
-    """
-    name = None
-    try:
-        info = ticker_obj.info or {}
-        name = info.get("longName") or info.get("shortName")
-    except Exception:
-        name = None
+    last = df_valid.iloc[-1]
 
-    return name or fallback_ticker
+    ma25, ma50, ma75 = last["25MA"], last["50MA"], last["75MA"]
+    rsi = last["RSI"]
+    bb_upper1, bb_upper2 = last["BB_+1σ"], last["BB_+2σ"]
+    bb_lower1, bb_lower2 = last["BB_-1σ"], last["BB_-2σ"]
 
+    # MA の傾き
+    if len(df["25MA"].dropna()) >= 4:
+        ma25_slope = (df["25MA"].iloc[-1] - df["25MA"].iloc[-4]) / df["25MA"].iloc[-4] * 100
+    else:
+        ma25_slope = 0.0
 
-def get_price_and_meta(ticker: str, period: str = "365d", interval: str = "1d"):
-    """
-    株価データとメタ情報を取得して返す。
-    - yfinance.download(actions=True) で価格＋配当を一括取得
-    - IRBANK から EPS/BPS を取得（日本株コードのみ）
-    失敗時は ValueError を投げる。
-    """
-    try:
-        # actions=True で Dividends 列を含める
-        df = yf.download(ticker, period=period, interval=interval, actions=True)
-    except Exception as e:
-        raise ValueError(f"株価データ取得エラー: {e}")
+    slope_ok = ma25_slope < 0
+    is_flat_or_gentle_up = abs(ma25_slope) <= 0.3 and ma25_slope >= 0
 
-    if df.empty:
-        raise ValueError("株価データが取得できませんでした。")
+    arrow25 = slope_arrow(df["25MA"])
+    arrow50 = slope_arrow(df["50MA"])
+    arrow75 = slope_arrow(df["75MA"])
 
-    # yfinance のマルチカラム対応
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ["_".join(col).strip() for col in df.columns]
+    # PER / PBR 計算
+    per = None
+    pbr = None
+    if eps not in (None, 0):
+        per = price / eps
+    if bps not in (None, 0):
+        pbr = price / bps
 
-    # Close 列特定
-    try:
-        close_col = next(c for c in df.columns if "Close" in c)
-    except StopIteration:
-        raise ValueError("終値（Close）列が見つかりませんでした。")
+    # BB 判定
+    bb_text, bb_icon, bb_strength = judge_bb_signal(
+        price, bb_upper1, bb_upper2, bb_lower1, bb_lower2
+    )
 
-    if len(df[close_col]) < 2:
-        raise ValueError("データ日数が不足しています（2営業日未満）。")
+    # 押し目シグナル
+    signal_text, signal_icon, signal_strength = judge_signal(
+        price,
+        ma25, ma50, ma75,
+        bb_lower1, bb_upper1, bb_lower2,
+        rsi, high_52w, low_52w,
+    )
 
-    close = float(df[close_col].iloc[-1])
-    previous_close = float(df[close_col].iloc[-2])
+    # 順張り・逆張りスコア
+    highprice_score = is_high_price_zone(
+        price, ma25, ma50, bb_upper1, rsi,
+        per, pbr, high_52w
+    )
+    low_score = is_low_price_zone(
+        price, ma25, ma50, bb_lower1, bb_lower2, rsi,
+        per, pbr, low_52w
+    )
 
-    # 52週高値・安値（取得期間内で代用）
-    high_52w = float(df[close_col].max())
-    low_52w = float(df[close_col].min())
+    trend_conditions = [
+        ma75 < ma50 < ma25,
+        is_flat_or_gentle_up,
+        highprice_score >= 60
+    ]
+    trend_ok = sum(trend_conditions)
+    trend_comment = [
+        "現時点では見送りが妥当です。",
+        "慎重に検討すべき状況です。",
+        "買い検討の余地があります。",
+        "買い候補として非常に魅力的です。"
+    ][trend_ok]
 
-    # 配当利回り（過去1年・Dividends列から）
-    dividend_yield = _compute_dividend_yield_from_df(df, close_col, close)
-
-    # 日本株なら IRBANK から EPS/BPS
-    eps, bps = None, None
-    code_for_irbank = None
-    if ticker.endswith(".T"):
-        code_for_irbank = ticker.replace(".T", "")
-    elif ticker.isdigit() and len(ticker) <= 5:
-        code_for_irbank = ticker
-
-    if code_for_irbank:
-        eps, bps = get_eps_bps_irbank(code_for_irbank)
-
-    # 銘柄名は yfinance.info で取る（API 1回）
-    ticker_obj = yf.Ticker(ticker)
-    company_name = _get_company_name(ticker_obj, ticker)
+    contrarian_conditions = [
+        (ma75 > ma50 > ma25) or is_flat_ma(ma25, ma50, ma75),
+        slope_ok,
+        low_score >= 60
+    ]
+    contr_ok = sum(contrarian_conditions)
+    contr_comment = [
+        "現時点では見送りが妥当です。",
+        "慎重に検討すべき状況です。",
+        "買い検討の余地があります。",
+        "買い候補として非常に魅力的です。"
+    ][contr_ok]
 
     return {
         "df": df,
-        "close_col": close_col,
-        "close": close,
-        "previous_close": previous_close,
-        "high_52w": high_52w,
-        "low_52w": low_52w,
-        "company_name": company_name,
-        "dividend_yield": dividend_yield,
-        "eps": eps,    # IRBANKから取得
-        "bps": bps,    # IRBANKから取得
+        "df_valid": df_valid,
+        "price": price,
+        "ma25": ma25,
+        "ma50": ma50,
+        "ma75": ma75,
+        "rsi": rsi,
+        "bb_upper1": bb_upper1,
+        "bb_upper2": bb_upper2,
+        "bb_lower1": bb_lower1,
+        "bb_lower2": bb_lower2,
+        "ma25_slope": ma25_slope,
+        "slope_ok": slope_ok,
+        "is_flat_or_gentle_up": is_flat_or_gentle_up,
+        "arrow25": arrow25,
+        "arrow50": arrow50,
+        "arrow75": arrow75,
+        "bb_text": bb_text,
+        "bb_icon": bb_icon,
+        "bb_strength": bb_strength,
+        "signal_text": signal_text,
+        "signal_icon": signal_icon,
+        "signal_strength": signal_strength,
+        "highprice_score": highprice_score,
+        "low_score": low_score,
+        "trend_conditions": trend_conditions,
+        "trend_comment": trend_comment,
+        "contrarian_conditions": contrarian_conditions,
+        "contr_comment": contr_comment,
+        "eps": eps,
+        "bps": bps,
+        "per": per,
+        "pbr": pbr,
     }
