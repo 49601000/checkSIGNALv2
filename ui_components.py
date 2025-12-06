@@ -65,13 +65,9 @@ def render_app():
     st.markdown(f"## 📌 {ticker}（{company_name}）")
 
     # PER / PBR の文字列整形（None のときは "—"）
-    per_str = "—"
-    pbr_str = "—"
-    if tech["per"] is not None:
-        per_str = f"{tech['per']:.2f}倍"
-    if tech["pbr"] is not None:
-        pbr_str = f"{tech['pbr']:.2f}倍"
-
+    per_str = f"{per:.2f}" if per is not None else "—"
+    pbr_str = f"{pbr:.2f}" if pbr is not None else "—"
+    
     price_text = f"{close:.2f}"
     prev_text = f"{previous_close:.2f}"
     ma25_text = f"{tech['ma25']:.2f} {tech['arrow25']}"
@@ -80,11 +76,10 @@ def render_app():
 
     # 複雑な f"""...""" をやめて、1行の文字列を連結して安全に生成
     html_header = (
-        f"**現在価格**: "
-        f"<span style='color:{price_color}; font-weight:bold;'>{price_text}</span>  <br>"
-        f"（前日終値: {prev_text}）  <br><br>"
-        f"**PER**: {per_str} ｜ **PBR**: {pbr_str}  <br><br>"
-        f"**25MA**: {ma25_text} ｜ **50MA**: {ma50_text} ｜ **75MA**: {ma75_text}"
+        f"""**現在価格**: <span style='color:{price_color}; font-weight:bold;'>{close:.2f}</span>（前日終値: {previous_close:.2f}） 
+        **PER**: {per_str} ｜ **PBR**: {pbr_str}  
+        **25MA**: {ma25:.2f} {arrow25} ｜ **50MA**: {ma50:.2f} {arrow50} ｜ **75MA**: {ma75:.2f} {arrow75}""",
+            unsafe_allow_html=True,
     )
     st.markdown(html_header, unsafe_allow_html=True)
 
