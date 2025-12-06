@@ -49,6 +49,8 @@ def render_app():
             low_52w,
             eps=eps,
             bps=bps,
+            eps_fwd=eps_fwd,
+            per_fwd=per_fwd
         )
     except ValueError as e:
         st.error(str(e))
@@ -71,6 +73,10 @@ def render_app():
     pbr_val = tech.get("pbr")
     per_str = f"{per_val:.2f}倍" if per_val is not None else "—"
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val is not None else "—"
+    per_fwd_val = tech.get("per_fwd_")
+    pbr_fwd_val = tech.get("pbr_fwd")
+    per__fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
+    pbr_fwd_str = f"{pbr_fwd_val:.2f}倍" if pbr_fwd_val is not None else "—"
 
     # HTML 部分を 1 本の文字列として組み立てる
     html_header = (
@@ -78,6 +84,7 @@ def render_app():
         f"<span style='color:{price_color}; font-weight:bold;'>{close:.2f}</span>  <br>"
         f"（前日終値: {previous_close:.2f}）  <br><br>"
         f"**PER**: {per_str} ｜ **PBR**: {pbr_str}  <br><br>"
+        f"**予想PER**: {per_str} ｜ **予想PBR**: {pbr_str}  <br><br>"
         f"**25MA**: {tech['ma25']:.2f} {tech['arrow25']} ｜ "
         f"**50MA**: {tech['ma50']:.2f} {tech['arrow50']} ｜ "
         f"**75MA**: {tech['ma75']:.2f} {tech['arrow75']}"
