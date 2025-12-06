@@ -16,9 +16,9 @@ def render_app():
     # ------------ FMP API Key ------------
     # （.streamlit/secrets.toml に FMP_API_KEY を設定しておく）
     try:
-        FMP_API_KEY = st.secrets["FMP_API_KEY"]
+        FMP_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
     except KeyError:
-        st.error("FMP_API_KEY が st.secrets に設定されていません。")
+        st.error("ALPHA_VANTAGE_API_KEY が st.secrets に設定されていません。")
         st.stop()
 
     # ------------ 入力 ------------
@@ -31,7 +31,7 @@ def render_app():
     # ------------ データ取得 ------------
     try:
         # ★ ここで FMP の API キーを渡す（米国株は FMP, 日本株は IRBANK を data_fetch 側で判定）
-        st.write("FMP_API_KEY loaded?:", "FMP_API_KEY" in st.secrets)
+        st.write("ALPHA_VANTAGE_API_KEY loaded?:", "ALPHA_VANTAGE_API_KEY" in st.secrets)
         base = get_price_and_meta(ticker)
     except ValueError as e:
         st.error(str(e))
