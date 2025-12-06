@@ -267,4 +267,6 @@ def compute_indicators(
         "bps": bps,
         "per": per,
         "pbr": pbr,
+        "eps_fwd": eps_fwd,
+        "per_fwd": per_fwd_calc,
     }
