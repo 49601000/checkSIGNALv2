@@ -42,7 +42,7 @@ def judge_bb_signal(price, bb1, bb2, bbm1, bbm2):
 def is_high_price_zone(price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w):
     """
     割高否定スコア（高いほど『割高ではない』方向）
-    → T スコアの順張りモードで利用
+    → トレンド判定や解説用
     """
     score = 0
     # 株価が25MA・50MAより +10% 未満 → OK
@@ -74,7 +74,7 @@ def is_low_price_zone(
 ):
     """
     割安スコア（高いほど『割安』方向）
-    → T スコアの逆張りモードで利用
+    → 逆張り側の解説用
     """
     score = 0
     # 株価が 25MA・50MA より -10% 以下
@@ -90,8 +90,9 @@ def is_low_price_zone(
     if rsi < 30:
         score += 15
     # 52週安値の 105% 以内
-    if price <= low_52w * 1.05:
-        score += 15
+    if low_52w is not None and low_52w != 0:
+        if price <= low_52w * 1.05:
+            score += 15
     # per / pbr は現状ロジックに未使用（拡張フック）
     return score
 
@@ -153,95 +154,6 @@ def judge_signal(
     else:
         return "押し目シグナルなし", "🟢", 0
 
-# ============================================================
-# タイミング用のヘルパー関数を追加
-# ============================================================
-
-def _score_timing_trend(
-    highprice_score: float,
-    low_score: float,
-    signal_strength: int,
-    price: float,
-    high_52w: float,
-    bb_upper1: float,
-    per: Optional[float],
-    pbr: Optional[float],
-) -> tuple[float, str, bool]:
-    """
-    順張り局面用：タイミングスコア T（0〜100）とラベル、 高値掴みフラグを返す。
-    """
-    # 割安度（押し目度）0〜1
-    low_norm = max(0.0, min(low_score / 85.0, 1.0))
-    # 押し目シグナル強度（0〜3）→ 0〜1
-    sig_norm = max(0.0, min(signal_strength / 3.0, 1.0))
-
-    # ベースは「中立〜軽い押し目」あたり（50点）
-    t = 50.0 + 40.0 * sig_norm + 10.0 * low_norm  # 最大でほぼ 100
-
-    # 高値掴みリスク判定（highprice_score が低いほど危険）
-    high_price_alert = False
-    if highprice_score <= 40:
-        high_price_alert = True
-    # ついでに「52週高値付近」「BB+1σ超え」「超高PER/PBR」も危険扱いにしてもOK
-    if high_52w and price >= high_52w * 0.97:
-        high_price_alert = True
-    if price >= bb_upper1:
-        high_price_alert = True
-    if per is not None and per > 35:
-        high_price_alert = True
-    if pbr is not None and pbr > 3.5:
-        high_price_alert = True
-
-    # 高値掴みリスクが立っているときは T を 40 点以下にキャップ
-    if high_price_alert and t > 40.0:
-        t = 40.0
-
-    # ラベル付け
-    if t <= 25:
-        label = "高値圏（要注意）"
-    elif t <= 50:
-        label = "押し目シグナルなし"
-    elif t <= 80:
-        label = "そこそこ押し目"
-    else:
-        label = "バーゲン（強い押し目）"
-
-    return t, label, high_price_alert
-
-
-def _score_timing_contrarian(
-    low_score: float,
-    highprice_score: float,
-) -> tuple[float, str, bool]:
-    """
-    逆張り局面用：タイミングスコア T（0〜100）とラベル、高値掴みフラグを返す。
-    ※ここでは low_score（割安度）だけを見る。
-    """
-    # 割安度 0〜1
-    low_norm = max(0.0, min(low_score / 85.0, 1.0))
-
-    # ベース 40点（＝押し目シグナルなし）
-    # そこから割安になるほど 100 点に近づく
-    t = 40.0 + 60.0 * low_norm   # low_score=0 → 40, max → 100
-
-    # highprice_score が低いときは「逆張りにすら乗りたくない高値圏」とみなしてキャップ
-    high_price_alert = False
-    if highprice_score <= 40:
-        high_price_alert = True
-    if high_price_alert and t > 40.0:
-        t = 40.0
-
-    # ラベル付け
-    if t <= 25:
-        label = "高値圏（要注意）"
-    elif t <= 50:
-        label = "押し目シグナルなし"
-    elif t <= 80:
-        label = "そこそこ押し目"
-    else:
-        label = "バーゲン（強い押し目）"
-
-    return t, label, high_price_alert
 
 # ============================================================
 # Q（ビジネスの質）スコア
@@ -377,85 +289,103 @@ def _score_valuation(
 
 # ============================================================
 # T（タイミング）スコア
-#  - 順張り: highprice_score ベース
-#  - 逆張り: low_score ベース
-#  + 押し目シグナルとの連動
-#  + 高値掴みアラートがある場合は T<=40 にキャップ
+#  - 純テクニカル（RSI / BB / 52週レンジ / MA位置 / MA傾き）だけで算出
+#  - PER / PBR / 配当利回りは使わない（Q / V に委ねる）
+#  - 下落トレンドかつ低スコアは「落ちるナイフ（要注意）」表示
 # ============================================================
 
-def _timing_label_from_score(t_score: float) -> str:
+def _calc_timing_score(
+    price: float,
+    rsi: Optional[float],
+    bb_upper1: float,
+    bb_upper2: float,
+    bb_lower1: float,
+    bb_lower2: float,
+    ma25: float,
+    ma50: float,
+    ma75: float,
+    ma25_slope: float,
+    low_52w: float,
+    high_52w: float,
+) -> float:
     """
-    Tスコアを言語ラベルへマッピング
-    0〜30 : 高値圏（要注意）
-    31〜50: 押し目シグナルなし〜様子見
-    51〜80: そこそこ押し目
-    81〜100: バーゲン（強い押し目）
+    タイミングスコア T（0〜100）を計算する。
+    50 = 中立。高いほど「押し目寄り」、低いほど「高値寄り or タイミング悪い」。
+    """
+    # ベースはニュートラル 50
+    t = 50.0
+
+    # ① RSI：50 からのズレを素直に反映（低いほどプラス、高いほどマイナス）
+    if rsi is not None:
+        t += (50.0 - rsi) * 0.6  # RSI=20 → +18, RSI=80 → -18
+
+    # ② ボリンジャーバンド位置
+    if price <= bb_lower2:
+        t += 20.0
+    elif price <= bb_lower1:
+        t += 10.0
+    elif price >= bb_upper2:
+        t -= 20.0
+    elif price >= bb_upper1:
+        t -= 10.0
+
+    # ③ 52週レンジ内の位置（0=安値, 1=高値）
+    if (
+        low_52w is not None
+        and high_52w is not None
+        and high_52w > low_52w
+    ):
+        pos = (price - low_52w) / (high_52w - low_52w)
+        # 中央(0.5)から外れるほどマイナス／プラス（安値側にいるとプラス）
+        t += (0.5 - pos) * 40.0  # 最大 ±20
+
+    # ④ MAとの位置：複数本割っていれば「押し目寄り」として加点
+    below_mas = sum([
+        price < ma25 if ma25 is not None else 0,
+        price < ma50 if ma50 is not None else 0,
+        price < ma75 if ma75 is not None else 0,
+    ])
+    t += below_mas * 5.0  # 最大 +15
+
+    # ⑤ 25MA の傾き：強い下落トレンドは少し減点（落ちるナイフ警戒）
+    if ma25_slope is not None:
+        if ma25_slope <= -1.0:
+            t -= 15.0
+        elif ma25_slope < 0:
+            t -= 5.0
+        elif ma25_slope >= 1.0:
+            # 強い上昇トレンドで押し目を狙うときの「ご褒美」少し加点
+            t += 5.0
+
+    # クリップ
+    t = max(0.0, min(100.0, t))
+    return float(round(t, 1))
+
+
+def _timing_label_from_score(
+    t_score: float,
+    is_downtrend: bool,
+    high_price_alert: bool,
+) -> str:
+    """
+    Tスコアと言語ラベルのマッピング。
+    下落トレンドで低スコアなら「落ちるナイフ（要注意）」、
+    それ以外の低スコアは「高値圏（要注意）」。
     """
     if t_score <= 30:
-        return "高値圏（要注意）"
+        if is_downtrend:
+            return "落ちるナイフ（要注意）"
+        elif high_price_alert:
+            return "高値圏（要注意）"
+        else:
+            # どちらとも言えないがタイミングが悪いケース
+            return "タイミング悪化（要注意）"
     elif t_score <= 50:
         return "押し目シグナルなし〜様子見"
     elif t_score <= 80:
         return "そこそこ押し目"
     else:
         return "バーゲン（強い押し目）"
-
-
-def _score_timing_trend(
-    highprice_score: float,
-    low_score: float,
-    signal_strength: int,
-    is_high_price_alert: bool,
-) -> float:
-    """
-    順張りモードの T スコア
-    - highprice_score をそのまま 0〜100 とみなす
-    - 押し目シグナルがあれば +α
-    - 高値掴みアラートがあれば T<=30 にキャップ
-    """
-    t_score = max(0.0, min(100.0, float(highprice_score)))
-
-    # 押し目シグナルによるブースト（順張りは「ご褒美」扱い）
-    if signal_strength >= 2:
-        t_score = min(100.0, t_score + 10.0)  # そこそこ〜強い押し目
-    elif signal_strength == 1:
-        t_score = min(100.0, t_score + 5.0)   # 軽い押し目
-
-    # 高値掴みアラート → どんな状況でも 30 点以上にはならない
-    if is_high_price_alert:
-        t_score = min(t_score, 30.0)
-
-    return t_score
-
-
-def _score_timing_contrarian(
-    highprice_score: float,
-    low_score: float,
-    signal_strength: int,
-    is_high_price_alert: bool,
-) -> float:
-    """
-    逆張りモードの T スコア
-    - low_score を 0〜100 とみなす
-    - 押し目シグナルが弱いと上限をキャップ
-    - 高値掴みアラートがあれば T<=40 にキャップ（安全弁）
-    """
-    t_score = max(0.0, min(100.0, float(low_score)))
-
-    # 押し目シグナルとの強い連動
-    if signal_strength == 0:
-        # 押し目シグナルなし → どんなに条件が揃っても 40 点まで
-        t_score = min(t_score, 40.0)
-    elif signal_strength == 1:
-        # 軽い押し目 → 70 点まで
-        t_score = min(t_score, 70.0)
-    # 2,3 → キャップ無し（0〜100）
-
-    # 高値掴みアラート（基本的には逆張り局面では発生しにくいが安全弁として）
-    if is_high_price_alert:
-        t_score = min(t_score, 30.0)
-
-    return t_score
 
 
 # ============================================================
@@ -482,8 +412,7 @@ def compute_indicators(
 
     - テクニカル系: MA / BB / RSI などはローカル計算
     - ファンダ系: EPS / BPS / ROE / ROA / 自己資本比率 / 配当利回り などは
-        data_fetch.get_price_and_meta() から渡された値を利用。
-      （このモジュールから外部 API は叩かない）
+        外部から渡された値を利用。
     """
     # 終値（最新）
     price = float(df[close_col].iloc[-1])
@@ -586,7 +515,7 @@ def compute_indicators(
         low_52w,
     )
 
-    # === 高値掴みアラート判定 ===
+    # === 高値掴みアラート判定（別途フラグで保持） ===
     high_price_alert = False
     if (
         (price >= bb_upper1)
@@ -595,8 +524,7 @@ def compute_indicators(
     ):
         high_price_alert = True
 
-    # === 順張り・逆張りスコア（従来のブル／ベア）===
-    # === 順張り・逆張りスコア（既存） ===
+    # === 順張り・逆張りスコア（既存のブル／ベアスコア） ===
     highprice_score = is_high_price_zone(
         price, ma25, ma50, bb_upper1, rsi,
         per, pbr, high_52w
@@ -632,51 +560,40 @@ def compute_indicators(
         "買い候補として非常に魅力的です。",
     ][contr_ok]
 
-    # === タイミングスコア T（QVT 用） ===
-    if trend_conditions[0]:  # 25MA > 50MA > 75MA → 順張りモード
-        t_score, timing_label, high_price_alert = _score_timing_trend(
-            highprice_score=highprice_score,
-            low_score=low_score,
-            signal_strength=signal_strength,
-            price=price,
-            high_52w=high_52w,
-            bb_upper1=bb_upper1,
-            per=per,
-            pbr=pbr,
-        )
-    else:
-        # それ以外は逆張りモードとして扱う
-        t_score, timing_label, high_price_alert = _score_timing_contrarian(
-            low_score=low_score,
-            highprice_score=highprice_score,
-        )
-
-
     # === Q / V スコア ===
     q_score = _score_quality(roe, roa, equity_ratio)
     v_score = _score_valuation(per, pbr, dividend_yield)
 
-    # === T スコア（モード判定＋高値掴みキャップ込み） ===
-    if trend_conditions[0]:
-        # 順張りモード
-        t_mode = "trend"
-        t_score = _score_timing_trend(
-            highprice_score=highprice_score,
-            low_score=low_score,
-            signal_strength=signal_strength,
-            is_high_price_alert=high_price_alert,
-        )
-    else:
-        # 逆張りモード
-        t_mode = "contrarian"
-        t_score = _score_timing_contrarian(
-            highprice_score=highprice_score,
-            low_score=low_score,
-            signal_strength=signal_strength,
-            is_high_price_alert=high_price_alert,
-        )
+    # === T スコア（純テクニカル）===
+    t_score = _calc_timing_score(
+        price=price,
+        rsi=rsi,
+        bb_upper1=bb_upper1,
+        bb_upper2=bb_upper2,
+        bb_lower1=bb_lower1,
+        bb_lower2=bb_lower2,
+        ma25=ma25,
+        ma50=ma50,
+        ma75=ma75,
+        ma25_slope=ma25_slope,
+        low_52w=low_52w,
+        high_52w=high_52w,
+    )
 
-    timing_label = _timing_label_from_score(t_score)
+    # モード（情報として残すだけ）
+    if ma25 > ma50 > ma75:
+        t_mode = "trend"
+    else:
+        t_mode = "contrarian"
+
+    # 強い下落トレンドか？
+    is_downtrend = bool(ma75 > ma50 > ma25 and ma25_slope < 0)
+
+    timing_label = _timing_label_from_score(
+        t_score=t_score,
+        is_downtrend=is_downtrend,
+        high_price_alert=high_price_alert,
+    )
 
     # 総合 QVT スコア（単純平均）
     qvt_score = (q_score + v_score + t_score) / 3.0
@@ -717,7 +634,7 @@ def compute_indicators(
         "pbr": pbr,
         "eps_fwd": eps_fwd,
         "per_fwd": per_fwd_calc,
-        # --- 新しく追加したファンダスコア関連 ---
+        # --- ファンダスコア関連 ---
         "roe": roe,
         "roa": roa,
         "equity_ratio": equity_ratio,
