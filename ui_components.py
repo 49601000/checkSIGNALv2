@@ -16,7 +16,7 @@ def render_app():
     # ------------ FMP API Key ------------
     # （.streamlit/secrets.toml に FMP_API_KEY を設定しておく）
     try:
-        FMP_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
+        ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
     except KeyError:
         st.error("ALPHA_VANTAGE_API_KEY が st.secrets に設定されていません。")
         st.stop()
