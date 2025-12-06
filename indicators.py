@@ -1,4 +1,5 @@
 # indicators.py
+from typing import Optional
 import pandas as pd
 
 
@@ -31,9 +32,6 @@ def judge_bb_signal(price, bb1, bb2, bbm1, bbm2):
 def is_high_price_zone(price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w):
     """
     割高否定スコア（高いほど『割高ではない』方向）
-
-    ※ per, pbr は今のところスコアに使っていないが、
-      将来ロジック追加するために引数だけ受け取っている。
     """
     score = 0
     if price <= ma25 * 1.10 and price <= ma50 * 1.10:
@@ -50,8 +48,6 @@ def is_high_price_zone(price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w):
 def is_low_price_zone(price, ma25, ma50, bb_lower1, bb_lower2, rsi, per, pbr, low_52w):
     """
     割安スコア（高いほど『割安』方向）
-
-    ※ こちらも per, pbr は現段階では未使用。
     """
     score = 0
     if price < ma25 * 0.90 and price < ma50 * 0.90:
@@ -102,10 +98,14 @@ def judge_signal(price, ma25, ma50, ma75, bb_lower1, bb_upper1, bb_lower2,
         return "押し目シグナルなし", "🟢", 0
 
 
-def compute_indicators(df: pd.DataFrame, close_col: str,
-                       high_52w: float, low_52w: float,
-                       eps: float | None = None,
-                       bps: float | None = None):
+def compute_indicators(
+    df: pd.DataFrame,
+    close_col: str,
+    high_52w: float,
+    low_52w: float,
+    eps: Optional[float] = None,
+    bps: Optional[float] = None,
+):
     """
     df に各種テクニカル指標を追加し、判定に必要な値をまとめて返す。
     ここで EPS/BPS から PER/PBR を計算する。
