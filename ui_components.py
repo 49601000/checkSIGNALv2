@@ -31,7 +31,7 @@ def render_app():
     # ------------ データ取得 ------------
     try:
         # ★ ここで FMP の API キーを渡す（米国株は FMP, 日本株は IRBANK を data_fetch 側で判定）
-        base = get_price_and_meta(ticker, fmp_api_key=FMP_API_KEY)
+        base = get_price_and_meta(ticker)
     except ValueError as e:
         st.error(str(e))
         st.stop()
