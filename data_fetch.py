@@ -1,11 +1,12 @@
+# data_fetch.py
 from typing import Optional, Tuple
 import re
+from datetime import datetime, timedelta
+
 import requests
 from bs4 import BeautifulSoup
-
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
 
 IRBANK_BASE = "https://irbank.net/"
 
@@ -117,43 +118,50 @@ def get_eps_bps_irbank(
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    def extract_number_after(label: str) -> Optional[float]:
+    def extract_number_near(label: str) -> Optional[float]:
         """
-        ページ内で label（例: 'EPS（連）', 'PER予'）にマッチするテキストを見つけ、
-        その直後付近の文字列から「数字っぽいところ」を抜き出して float 化する。
+        ページ内で label にマッチするテキストノードを見つけ、
+        そのノード自身と、近くのテキストノードから数字を探して float 化する。
+
+        「PER予 18.46倍」のようにラベルと数字が
+        同じテキストノードに含まれているケースも拾えるようにする。
         """
         node = soup.find(string=re.compile(re.escape(label)))
         if not node:
             return None
 
         cur = node
-        # 近くのテキストノードを数ステップ探索して数字を探す
+        # node 自身 + その後ろ数ノードをチェック
         for _ in range(8):
-            cur = cur.find_next(string=True)
-            if not cur:
+            if cur is None:
                 break
-            m = re.search(r"([\d,]+(?:\.\d+)?)", cur)
+
+            text = str(cur)
+            m = re.search(r"([\d,]+(?:\.\d+)?)", text)
             if m:
                 try:
                     return float(m.group(1).replace(",", ""))
                 except ValueError:
                     return None
+
+            cur = cur.find_next(string=True)
+
         return None
 
     # EPS / BPS（連）優先、なければ単体 or 汎用ラベルをフォールバック
     eps = (
-        extract_number_after("EPS（連）")
-        or extract_number_after("EPS（単）")
-        or extract_number_after("EPS")
+        extract_number_near("EPS（連）")
+        or extract_number_near("EPS（単）")
+        or extract_number_near("EPS")
     )
     bps = (
-        extract_number_after("BPS（連）")
-        or extract_number_after("BPS（単）")
-        or extract_number_after("BPS")
+        extract_number_near("BPS（連）")
+        or extract_number_near("BPS（単）")
+        or extract_number_near("BPS")
     )
 
-    # PER予（予想PER）。IRBANK 上では「PER予」と表示されている想定。
-    per_fwd = extract_number_after("PER予")
+    # PER予（予想PER）
+    per_fwd = extract_number_near("PER予")
 
     return eps, bps, per_fwd
 
