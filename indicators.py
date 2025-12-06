@@ -1,6 +1,74 @@
 # indicators.py
 from typing import Optional
 import pandas as pd
+import requests
+
+FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+
+
+def fetch_fmp_fundamentals(
+    symbol: str,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    FMP から EPS / BPS / 予想EPS を取得するヘルパー関数。
+    - EPS:    key-metrics-ttm の epsTTM
+    - BPS:    key-metrics-ttm の bookValuePerShareTTM
+    - 予想EPS: analyst-estimates の estimatedEPSAvg（直近 1 件）
+    """
+    eps: Optional[float] = None
+    bps: Optional[float] = None
+    eps_fwd: Optional[float] = None
+
+    # Streamlit secrets から API キー取得（存在しなければ何もしない）
+    api_key: Optional[str] = None
+    try:
+        import streamlit as st
+
+        api_key = st.secrets.get("FMP_API_KEY")  # ユーザー側で管理
+    except Exception:
+        api_key = None
+
+    if not api_key:
+        # API キーが無い場合は FMP を使わずに終了
+        return eps, bps, eps_fwd
+
+    params = {"apikey": api_key}
+
+    # --- EPS / BPS（TTM） ---
+    try:
+        url_km = f"{FMP_BASE_URL}/key-metrics-ttm/{symbol}"
+        resp = requests.get(url_km, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list) and data:
+            row = data[0]
+            eps_val = row.get("epsTTM") or row.get("eps")
+            bps_val = (
+                row.get("bookValuePerShareTTM") or row.get("bookValuePerShare")
+            )
+            if isinstance(eps_val, (int, float)):
+                eps = float(eps_val)
+            if isinstance(bps_val, (int, float)):
+                bps = float(bps_val)
+    except Exception as e:
+        print(f"[FMP] key-metrics-ttm error ({symbol}): {e}")
+
+    # --- 予想EPS（アナリスト予想） ---
+    try:
+        url_est = f"{FMP_BASE_URL}/analyst-estimates/{symbol}"
+        params_est = {**params, "limit": 1}
+        resp = requests.get(url_est, params=params_est, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list) and data:
+            row = data[0]
+            eps_fwd_val = row.get("estimatedEPSAvg")
+            if isinstance(eps_fwd_val, (int, float)):
+                eps_fwd = float(eps_fwd_val)
+    except Exception as e:
+        print(f"[FMP] analyst-estimates error ({symbol}): {e}")
+
+    return eps, bps, eps_fwd
 
 
 def slope_arrow(series: pd.Series, window: int = 3) -> str:
@@ -49,8 +117,17 @@ def is_high_price_zone(price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w):
     return score
 
 
-def is_low_price_zone(price, ma25, ma50, bb_lower1, bb_lower2,
-                      rsi, per, pbr, low_52w):
+def is_low_price_zone(
+    price,
+    ma25,
+    ma50,
+    bb_lower1,
+    bb_lower2,
+    rsi,
+    per,
+    pbr,
+    low_52w,
+):
     """
     割安スコア（高いほど『割安』方向）
     """
@@ -77,8 +154,18 @@ def is_flat_ma(ma25, ma50, ma75, tolerance=0.03):
     return (ma_max - ma_min) / ma_max <= tolerance
 
 
-def judge_signal(price, ma25, ma50, ma75, bb_lower1, bb_upper1, bb_lower2,
-                 rsi, high_52w, low_52w):
+def judge_signal(
+    price,
+    ma25,
+    ma50,
+    ma75,
+    bb_lower1,
+    bb_upper1,
+    bb_lower2,
+    rsi,
+    high_52w,
+    low_52w,
+):
 
     if rsi is None:
         return "RSI不明", "⚪️", 0
@@ -96,8 +183,16 @@ def judge_signal(price, ma25, ma50, ma75, bb_lower1, bb_upper1, bb_lower2,
         return "軽い押し目", "🟡", 1
 
     # --- 🔥 高値圏（要注意！） ---
-    elif is_high_price_zone(price, ma25, ma50, bb_upper1, rsi,
-                            None, None, high_52w) <= 40:
+    elif is_high_price_zone(
+        price,
+        ma25,
+        ma50,
+        bb_upper1,
+        rsi,
+        None,
+        None,
+        high_52w,
+    ) <= 40:
         return "高値圏（要注意！）", "🔥", 0
 
     # --- 押し目なし ---
@@ -110,6 +205,7 @@ def compute_indicators(
     close_col: str,
     high_52w: float,
     low_52w: float,
+    ticker: Optional[str] = None,
     eps: Optional[float] = None,
     bps: Optional[float] = None,
     eps_fwd: Optional[float] = None,
@@ -117,10 +213,25 @@ def compute_indicators(
 ):
     """
     df に各種テクニカル指標を追加し、判定に必要な値をまとめて返す。
+
+    - テクニカル系: MA / BB / RSI などはローカル計算
+    - ファンダ系: EPS / BPS / 予想EPS は
+        1) 引数で渡されていればそれを優先
+        2) 無ければ ticker が指定されているとき FMP から取得
     ここで EPS/BPS から PER/PBR を計算する。
     """
     # 終値（最新）
     price = float(df[close_col].iloc[-1])
+
+    # --- 必要であれば FMP から EPS/BPS/予想EPS を取得 ---
+    if ticker and (eps is None or bps is None or eps_fwd is None):
+        fmp_eps, fmp_bps, fmp_eps_fwd = fetch_fmp_fundamentals(ticker)
+        if eps is None:
+            eps = fmp_eps
+        if bps is None:
+            bps = fmp_bps
+        if eps_fwd is None:
+            eps_fwd = fmp_eps_fwd
 
     # === 移動平均 ===
     df["25MA"] = df[close_col].rolling(25).mean()
@@ -144,12 +255,19 @@ def compute_indicators(
     df["RSI"] = 100 - (100 / (1 + (avg_gain / avg_loss)))
 
     # 有効データ
-    df_valid = df.dropna(subset=[
-    close_col,
-    "25MA", "50MA", "75MA",
-    "BB_+1σ", "BB_+2σ", "BB_-1σ", "BB_-2σ",
-    "RSI",
-])
+    df_valid = df.dropna(
+        subset=[
+            close_col,
+            "25MA",
+            "50MA",
+            "75MA",
+            "BB_+1σ",
+            "BB_+2σ",
+            "BB_-1σ",
+            "BB_-2σ",
+            "RSI",
+        ]
+    )
 
     if df_valid.empty or len(df_valid) < 5:
         raise ValueError("テクニカル指標を計算するためのデータが不足しています。")
@@ -164,11 +282,15 @@ def compute_indicators(
     # === MA の傾き ===
     ma25_series = df["25MA"].dropna()
     if len(ma25_series) >= 4:
-        ma25_slope = (ma25_series.iloc[-1] - ma25_series.iloc[-4]) / ma25_series.iloc[-4] * 100
+        ma25_slope = (
+            (ma25_series.iloc[-1] - ma25_series.iloc[-4])
+            / ma25_series.iloc[-4]
+            * 100
+        )
     else:
         ma25_slope = 0.0
 
-    slope_ok = ma25_slope < 0          # 逆張り条件
+    slope_ok = ma25_slope < 0  # 逆張り条件
     is_flat_or_gentle_up = abs(ma25_slope) <= 0.3 and ma25_slope >= 0  # 順張り条件
 
     arrow25 = slope_arrow(df["25MA"])
@@ -176,15 +298,16 @@ def compute_indicators(
     arrow75 = slope_arrow(df["75MA"])
 
     # === PER / PBR 計算 ===
-    #実績 PER
     per: Optional[float] = None
     pbr: Optional[float] = None
     if eps not in (None, 0):
         per = price / eps
     if bps not in (None, 0):
         pbr = price / bps
-    # 予想 PER（IRBANK にある数字を優先し、なければ eps_fwd から計算）
-    per_fwd_calc = None
+
+    # 予想 PER（FMP/IRBANK 由来の per_fwd を優先し、
+    # 無ければ eps_fwd から計算）
+    per_fwd_calc: Optional[float] = None
     if per_fwd not in (None, 0):
         per_fwd_calc = per_fwd
     elif eps_fwd not in (None, 0):
@@ -198,19 +321,31 @@ def compute_indicators(
     # === 押し目シグナル判定 ===
     signal_text, signal_icon, signal_strength = judge_signal(
         price,
-        ma25, ma50, ma75,
-        bb_lower1, bb_upper1, bb_lower2,
-        rsi, high_52w, low_52w,
+        ma25,
+        ma50,
+        ma75,
+        bb_lower1,
+        bb_upper1,
+        bb_lower2,
+        rsi,
+        high_52w,
+        low_52w,
     )
 
     # === 順張り・逆張りスコア ===
     highprice_score = is_high_price_zone(
-        price, ma25, ma50, bb_upper1, rsi,
-        per, pbr, high_52w
+        price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w
     )
     low_score = is_low_price_zone(
-        price, ma25, ma50, bb_lower1, bb_lower2, rsi,
-        per, pbr, low_52w
+        price,
+        ma25,
+        ma50,
+        bb_lower1,
+        bb_lower2,
+        rsi,
+        per,
+        pbr,
+        low_52w,
     )
 
     trend_conditions = [
