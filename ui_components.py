@@ -50,6 +50,9 @@ def render_app():
     eps_fwd = base.get("eps_fwd")  # 予想EPS
     per_fwd = base.get("per_fwd")  # PER予
 
+    # ここに一時デバッグ表示を追加
+    st.write("DEBUG fundamental:",{"eps": eps, "bps": bps, "eps_fwd": eps_fwd, "per_fwd": per_fwd})
+
     # ------------ テクニカル指標 + PER/PBR ------------
     try:
         tech = compute_indicators(
