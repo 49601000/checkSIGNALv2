@@ -17,27 +17,25 @@ FMP_API_KEY: Optional[str] = st.secrets.get("FMP_API_KEY")
 
 
 # -----------------------------------------------------------
-# ティッカー補正
+# ティッカー補正 / JPX 判定
 # -----------------------------------------------------------
 def convert_ticker(ticker: str) -> str:
     """
-    日本株コードの場合に自動で .T を付与。
-    例: "7203" -> "7203.T"
+    日本株コード (数字4〜5桁) の場合は自動で .T を付与。
+    その他はそのまま大文字化して返す。
     """
-    ticker = ticker.strip().upper()
-    if ticker.isdigit() and len(ticker) <= 5 and not ticker.endswith(".T"):
-        return ticker + ".T"
-    return ticker
+    t = ticker.strip().upper()
+    if t.isdigit() and len(t) <= 5 and not t.endswith(".T"):
+        return t + ".T"
+    return t
 
 
 def is_jpx_ticker(ticker: str) -> bool:
-    """東証銘柄かどうか（.T または数値コードとみなす簡易判定）"""
-    t = ticker.upper()
-    if t.endswith(".T"):
-        return True
-    if t.isdigit() and len(t) <= 5:
-        return True
-    return False
+    """
+    末尾 .T か、数字4〜5桁だけなら JPX 銘柄とみなす。
+    """
+    t = ticker.strip().upper()
+    return t.endswith(".T") or (t.isdigit() and len(t) <= 5)
 
 
 # -----------------------------------------------------------
@@ -79,7 +77,7 @@ def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[flo
 # -----------------------------------------------------------
 def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
     """
-    yfinance.info から銘柄名を取得。なければティッカーで代用。
+    yfinance.info  から銘柄名を取得。なければティッカーで代用。
     """
     name = None
     try:
@@ -159,42 +157,61 @@ def get_eps_bps_irbank(
 def get_us_eps_bps_from_fmp(
     symbol: str,
     close: float,
+    api_key: Optional[str] = None,
 ) -> Tuple[Optional[float], Optional[float]]:
     """
-    FMP /ratios-ttm から peTTM, pbTTM を取得し、
-    現在株価 close から EPS / BPS を逆算する。
+    FMP /ratios-ttm から EPS/BPS を取得。
+    - epsTTM / bvpsTTM があればそれを使用
+    - なければ peTTM / pbTTM と株価 close から逆算
     """
-    if not FMP_API_KEY:
-        print("[FMP] API key not set")
+    key = api_key or FMP_API_KEY
+    if not key:
+        print("[FMP] API key が設定されていません")
         return None, None
 
-    url = f"{FMP_BASE}/ratios-ttm/{symbol}?apikey={FMP_API_KEY}"
+    url = f"{FMP_BASE}/ratios-ttm/{symbol}?apikey={key}"
+    print(f"[FMP] request -> {url}")
 
     try:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
     except Exception as e:
         print(f"[FMP] request error ({symbol}): {e}")
         return None, None
 
-    if not isinstance(data, list) or len(data) == 0:
-        print(f"[FMP] empty ratios data ({symbol}) -> {data}")
+    try:
+        data = resp.json()
+    except Exception as e:
+        print(f"[FMP] json error ({symbol}): {e}, text={resp.text[:200]}")
         return None, None
 
-    item = data[0] or {}
-    pe_ttm = item.get("peTTM")
-    pb_ttm = item.get("pbTTM")
+    print(f"[FMP] raw json ({symbol}): {data}")
 
-    eps = None
-    bps = None
+    if not isinstance(data, list) or not data:
+        print(f"[FMP] unexpected payload ({symbol}): {data}")
+        return None, None
 
-    if pe_ttm not in (None, 0, 0.0) and close > 0:
+    ratios = data[0] or {}
+
+    eps_ttm = ratios.get("epsTTM") or ratios.get("netIncomePerShareTTM")
+    bps_ttm = ratios.get("bvpsTTM") or ratios.get("bookValuePerShareTTM")
+    pe_ttm = ratios.get("peTTM") or ratios.get("priceEarningsRatioTTM")
+    pb_ttm = ratios.get("pbTTM") or ratios.get("priceToBookRatioTTM")
+
+    eps = eps_ttm
+    bps = bps_ttm
+
+    # 足りない場合は PER/PBR と株価から逆算
+    if eps in (None, 0, 0.0) and pe_ttm not in (None, 0, 0.0) and close > 0:
         eps = close / pe_ttm
-    if pb_ttm not in (None, 0, 0.0) and close > 0:
+    if bps in (None, 0, 0.0) and pb_ttm not in (None, 0, 0.0) and close > 0:
         bps = close / pb_ttm
 
-    print(f"[FMP] {symbol} peTTM={pe_ttm}, pbTTM={pb_ttm}, eps={eps}, bps={bps}")
+    print(
+        f"[FMP] parsed ({symbol}) eps={eps} (raw_eps={eps_ttm}, pe={pe_ttm}), "
+        f"bps={bps} (raw_bps={bps_ttm}, pb={pb_ttm})"
+    )
+
     return eps, bps
 
 
@@ -211,7 +228,7 @@ def get_price_and_meta(
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
     - 日本株コードなら IRBANK で 実績EPS / BPS / PER予 を取得し、そこから予想EPSも計算
-    - それ以外（米国株など）は FMP から peTTM / pbTTM を取得して EPS/BPS を逆算
+    - それ以外（米国株など）は FMP から EPS/BPS を取得
     """
     # --- 価格データ（yfinance.download）---
     try:
@@ -262,9 +279,8 @@ def get_price_and_meta(
         # 予想PERが取れていて株価も正なら、そこから予想EPSを逆算
         if per_fwd not in (None, 0.0) and close > 0:
             eps_fwd = close / per_fwd
-
     else:
-        # 米国銘柄など → FMP の ratios-ttm から EPS/BPS を逆算
+        # 米国銘柄など → FMP の ratios-ttm から EPS/BPS を取得
         eps, bps = get_us_eps_bps_from_fmp(ticker, close)
 
     return {
@@ -282,49 +298,3 @@ def get_price_and_meta(
         "per_fwd": per_fwd,   # JPX: PER予
         "eps_fwd": eps_fwd,   # JPX: 予想EPS
     }
-
-
-
-# -----------------------------------------------------------
-# エラー特定
-# -----------------------------------------------------------
-
-def get_us_eps_bps_from_fmp(symbol: str, api_key: str):
-    if not api_key:
-        print("[FMP] API key が設定されていません")
-        return None, None, None, None
-
-    url = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{symbol}?apikey={api_key}"
-    print(f"[FMP] request -> {url}")  # ★ どの URL を叩いているか
-
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[FMP] request error ({symbol}): {e}")
-        return None, None, None, None
-
-    try:
-        data = resp.json()
-    except Exception as e:
-        print(f"[FMP] json error ({symbol}): {e}, text={resp.text[:200]}")
-        return None, None, None, None
-
-    print(f"[FMP] raw json ({symbol}): {data}")  # ★ 返ってきた JSON を確認
-
-    # data が list じゃなければエラー
-    if not isinstance(data, list) or not data:
-        print(f"[FMP] unexpected payload ({symbol}): {data}")
-        return None, None, None, None
-
-    ratios = data[0]
-
-    eps_ttm = ratios.get("epsTTM") or ratios.get("netIncomePerShareTTM")
-    bps_ttm = ratios.get("bvpsTTM") or ratios.get("bookValuePerShareTTM")
-    per_ttm = ratios.get("peTTM") or ratios.get("priceEarningsRatioTTM")
-    pbr_ttm = ratios.get("pbTTM") or ratios.get("priceToBookRatioTTM")
-
-    print(f"[FMP] parsed ({symbol}) eps={eps_ttm}, bps={bps_ttm}, pe={per_ttm}, pb={pbr_ttm}")
-
-    return eps_ttm, bps_ttm, per_ttm, pbr_ttm
-
