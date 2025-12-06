@@ -9,44 +9,6 @@ def setup_page():
     st.title("🔍買いシグナルチェッカー")
 
 
-def _evaluate_environment(tech: dict, qvt_score: float) -> tuple[int, str]:
-    """
-    QVTベースの環境評価スコア（0〜3）とラベルを返す。
-
-    - トレンドフラグ: 中期トレンドが良好か（trend_conditionsのうち2つ以上がTrue）
-    - 短期フラグ: Tスコア >= 60 かつ「落ちるナイフ」ではない
-    - QVTフラグ: QVTスコア >= 60
-
-    合計 0〜3 を 4段階ラベルに変換。
-    """
-    trend_conditions = tech.get("trend_conditions", [])
-    t_score = float(tech.get("t_score", 0.0))
-    timing_label = tech.get("timing_label", "")
-
-    # トレンド良好判定（3つの条件のうち2つ以上満たしていれば1点）
-    trend_ok_count = sum(1 for c in trend_conditions if c)
-    trend_flag = 1 if trend_ok_count >= 2 else 0
-
-    # 短期タイミング良好判定
-    short_flag = 1 if (t_score >= 60 and "落ちるナイフ" not in timing_label) else 0
-
-    # QVT良好判定
-    qvt_flag = 1 if qvt_score >= 60 else 0
-
-    env_score = trend_flag + short_flag + qvt_flag
-
-    if env_score == 3:
-        label = "環境◎（中期・短期・総合のすべてが良好）"
-    elif env_score == 2:
-        label = "環境◯（一部に弱みはあるが、総合的には良好）"
-    elif env_score == 1:
-        label = "環境△（局所的にのみ魅力あり）"
-    else:
-        label = "環境×（総合的には見送り候補）"
-
-    return env_score, label
-
-
 def render_app():
     setup_page()
 
@@ -163,35 +125,54 @@ def render_app():
     qvt_score = float(tech.get("qvt_score", 0.0))
     timing_label = tech.get("timing_label", "")
 
-    # 環境評価（QVT＋トレンド＋短期）
-    env_score, env_label = _evaluate_environment(tech, qvt_score)
-
     # --- タブ構成 ---
     tab_t, tab_q, tab_v, tab_qvt = st.tabs(
         ["T（押し目・タイミング）", "Q（ビジネスの質）", "V（バリュエーション）", "QVT（総合）"]
     )
 
     # ================================
-    # 🟦 Tタブ：押し目・タイミング
+    # 🟦 Tタブ：押し目・タイミング + 環境表 + 裁量レンジ
     # ================================
     with tab_t:
         st.subheader("⏰ T（タイミング）")
 
-        col_t_main, col_env = st.columns(2)
+        st.metric("Tスコア（タイミング）", f"{t_score:.1f} / 100")
+        st.caption(f"タイミング評価: {timing_label}")
 
-        with col_t_main:
-            st.metric("Tスコア（タイミング）", f"{t_score:.1f} / 100")
-            st.caption(f"タイミング評価: {timing_label}")
+        st.markdown("---")
+        st.markdown("#### 🧱 環境チェック（〇×）")
 
-        with col_env:
-            st.metric("環境スコア（0〜3）", f"{env_score} / 3")
-            st.caption(env_label)
+        trend_conditions = tech.get("trend_conditions", [False, False, False])
+        contrarian_conditions = tech.get("contrarian_conditions", [False, False, False])
+
+        qvt_good = qvt_score >= 60
+
+        # 順張りモードかどうか
+        is_trend_mode = tech.get("t_mode") == "trend" or trend_conditions[0]
+
+        if is_trend_mode:
+            # 順張りの環境表
+            mid_trend_ok = "○" if trend_conditions[0] else "×"
+            short_trend_ok = "○" if trend_conditions[1] else "×"
+        else:
+            # 逆張りの環境表
+            mid_trend_ok = "○" if contrarian_conditions[0] else "×"
+            short_trend_ok = "○" if contrarian_conditions[1] else "×"
+
+        qvt_ok = "○" if qvt_good else "×"
+
+        st.markdown(
+            f"""
+| 項目 | 内容 | 判定 |
+|---|---|:---:|
+| 中期トレンド | {'25MA ＞ 50MA ＞ 75MA' if is_trend_mode else '下降 or 横ばい（or MA接近）'} | {mid_trend_ok} |
+| 短期傾向 | {'MA25 横ばい〜緩やか上昇' if is_trend_mode else 'MA25 下降'} | {short_trend_ok} |
+| 総合力 | QVTスコア ≧ 60 | {qvt_ok} |
+            """
+        )
 
         st.markdown("---")
         st.markdown("#### 📌 裁量買いレンジ（目安）")
-
-        # 順張りモードかどうか
-        is_trend_mode = tech.get("t_mode") == "trend" or tech["trend_conditions"][0]
 
         if is_trend_mode:
             # 順張り：25MAと50MAの平均を中心に、少し上まで許容
@@ -203,9 +184,9 @@ def render_app():
 
             st.markdown(
                 f"""
-- 中心価格（目安）: **{center_price:.2f}**
-- 買い検討レンジ（目安）: **{lower_price:.2f} 〜 {upper_price:.2f}**
-- コメント: {tech.get("trend_comment", "トレンド判定コメントなし")}
+中心価格（目安）: **{center_price:.2f}**  
+買い検討レンジ（目安）: **{lower_price:.2f} 〜 {upper_price:.2f}**  
+コメント: {tech.get("trend_comment", "買い検討コメントなし")}
                 """
             )
 
@@ -219,14 +200,15 @@ def render_app():
 
             st.markdown(
                 f"""
-- 中心価格（目安）: **{center_price:.2f}**
-- 買い検討レンジ（目安）: **{lower_price:.2f} 〜 {upper_price:.2f}**
-- コメント: {tech.get("contr_comment", "逆張り判定コメントなし")}
+中心価格（目安）: **{center_price:.2f}**  
+買い検討レンジ（目安）: **{lower_price:.2f} 〜 {upper_price:.2f}**  
+コメント: {tech.get("contr_comment", "逆張りコメントなし")}
                 """
             )
 
         st.info(
-            "※ 裁量買いレンジはテクニカル指標に基づく目安です。"
+            "※ 環境チェック（〇×）と裁量買いレンジは、"
+            "タイミングとトレンド・QVTスコアを組み合わせた“目安”です。"
             "実際のエントリーはポジションサイズやPF全体のバランスも加味して判断してください。"
         )
 
