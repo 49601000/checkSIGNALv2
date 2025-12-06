@@ -7,12 +7,14 @@ import requests
 from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
+import streamlit as st  # ← 追加：FMPのAPIキーをst.secretsから取得
 
 IRBANK_BASE = "https://irbank.net/"
+FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
 
 # -----------------------------------------------------------
-# ティッカー補正
+# ティッカー補正（日本株コードの場合に .T を付与）
 # -----------------------------------------------------------
 def convert_ticker(ticker: str) -> str:
     """
@@ -62,7 +64,7 @@ def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[flo
 
 
 # -----------------------------------------------------------
-# 銘柄名取得
+# 銘柄名取得（yfinance.info）
 # -----------------------------------------------------------
 def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
     """
@@ -78,9 +80,9 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
     return name or fallback_ticker
 
 
-# -----------------------------------------------------------
-# IRBANK から 実績EPS / BPS / PER予 を取得
-# -----------------------------------------------------------
+# ===========================================================
+# IRBANK から EPS / BPS / PER予 を取得（日本株用）
+# ===========================================================
 def get_eps_bps_irbank(
     code: str,
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -166,9 +168,102 @@ def get_eps_bps_irbank(
     return eps, bps, per_fwd
 
 
-# -----------------------------------------------------------
+# ===========================================================
+# FMP API から US 銘柄の EPS / BPS / 予想EPS を取得
+# ===========================================================
+def _fmp_get(path: str, api_key: str, params: Optional[dict] = None):
+    """
+    FMP の共通 GET ラッパー。失敗時は None を返す。
+    """
+    if not api_key:
+        return None
+
+    url = f"{FMP_BASE}{path}"
+    q = {"apikey": api_key}
+    if params:
+        q.update(params)
+
+    try:
+        resp = requests.get(url, params=q, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"[FMP] request error ({path}): {e}")
+        return None
+
+
+def get_us_fundamentals_fmp(
+    symbol: str,
+    price: float,
+    api_key: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """
+    FMP から US 銘柄の実績 EPS / BPS / 予想EPS を取得し、
+    予想EPS から PER予 も計算して返す。
+
+    Returns
+    -------
+    (eps_actual, bps_actual, per_fwd, eps_fwd)
+    """
+    eps: Optional[float] = None
+    bps: Optional[float] = None
+    per_fwd: Optional[float] = None
+    eps_fwd: Optional[float] = None
+
+    # --- 実績 EPS: income-statement ---
+    income = _fmp_get(f"/income-statement/{symbol}", api_key, {"limit": 1})
+    if isinstance(income, list) and income:
+        row = income[0]
+        raw = row.get("eps") or row.get("epsDiluted")
+        try:
+            if raw not in (None, ""):
+                eps = float(raw)
+        except Exception:
+            eps = None
+
+    # --- BPS: balance-sheet-statement（株主資本 ÷ 発行済株式数） ---
+    bs = _fmp_get(f"/balance-sheet-statement/{symbol}", api_key, {"limit": 1})
+    if isinstance(bs, list) and bs:
+        row = bs[0]
+        equity = row.get("totalStockholdersEquity") or row.get("totalEquity")
+        shares = (
+            row.get("commonStockSharesOutstanding")
+            or row.get("commonSharesOutstanding")
+        )
+        try:
+            if equity not in (None, "") and shares not in (None, "", 0):
+                equity_val = float(equity)
+                shares_val = float(shares)
+                if shares_val > 0:
+                    bps = equity_val / shares_val
+        except Exception:
+            bps = None
+
+    # --- 予想 EPS: analyst-estimates ---
+    estimates = _fmp_get(f"/analyst-estimates/{symbol}", api_key, {"limit": 1})
+    if isinstance(estimates, list) and estimates:
+        row = estimates[0]
+        raw_est = (
+            row.get("estimatedEpsAvg")
+            or row.get("epsAvg")
+            or row.get("estimatedEpsHigh")
+        )
+        try:
+            if raw_est not in (None, ""):
+                eps_fwd = float(raw_est)
+        except Exception:
+            eps_fwd = None
+
+    # 予想PER = price / 予想EPS
+    if eps_fwd not in (None, 0.0) and price > 0:
+        per_fwd = price / eps_fwd
+
+    return eps, bps, per_fwd, eps_fwd
+
+
+# ===========================================================
 # メイン：価格 + メタ情報 + EPS/BPS/予想EPS 取得
-# -----------------------------------------------------------
+# ===========================================================
 def get_price_and_meta(
     ticker: str,
     period: str = "180d",
@@ -178,6 +273,8 @@ def get_price_and_meta(
     株価データとメタ情報を取得して返す。
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
+    - 米国株コードなら FMP で 実績EPS / BPS / 予想EPS を取得し、
+      そこから予想PER も計算
     - 日本株コードなら IRBANK で 実績EPS / BPS / PER予 を取得し、
       そこから予想EPSも計算する。
 
@@ -217,24 +314,43 @@ def get_price_and_meta(
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
-    # --- IRBANK（日本株のみ）---
+    # --- EPS / BPS / 予想PER / 予想EPS ---
     eps: Optional[float] = None          # 実績EPS
     bps: Optional[float] = None          # 実績BPS
-    per_fwd: Optional[float] = None      # PER予
-    eps_fwd: Optional[float] = None      # 予想EPS（アプリ側で計算）
+    per_fwd: Optional[float] = None      # 予想PER
+    eps_fwd: Optional[float] = None      # 予想EPS
 
+    # 日本株判定
+    is_jp = False
     code_for_irbank: Optional[str] = None
     if ticker.endswith(".T"):
+        is_jp = True
         code_for_irbank = ticker.replace(".T", "")
     elif ticker.isdigit() and len(ticker) <= 5:
-        # 念のため、.T なしコードでも対応
+        is_jp = True
         code_for_irbank = ticker
 
-    if code_for_irbank is not None:
-        eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
-        # 予想PERが取れていて株価も正なら、そこから予想EPSを逆算
-        if per_fwd not in (None, 0.0) and close > 0:
-            eps_fwd = close / per_fwd
+    if is_jp:
+        # --- 日本株: IRBANK ---
+        if code_for_irbank is not None:
+            eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
+            # IRBANK の予想PERから予想EPSを逆算
+            if per_fwd not in (None, 0.0) and close > 0:
+                eps_fwd = close / per_fwd
+    else:
+        # --- 米国株など: FMP ---
+        fmp_key = None
+        try:
+            fmp_key = st.secrets["FMP_API_KEY"]
+        except Exception:
+            print("[FMP] st.secrets['FMP_API_KEY'] が設定されていません。US指標は取得しません。")
+
+        if fmp_key:
+            eps, bps, per_fwd, eps_fwd = get_us_fundamentals_fmp(
+                symbol=ticker,
+                price=close,
+                api_key=fmp_key,
+            )
 
     return {
         "df": df,
@@ -245,9 +361,9 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        # IRBANK 系
+        # IRBANK / FMP 系
         "eps": eps,           # 実績EPS
         "bps": bps,           # 実績BPS
-        "per_fwd": per_fwd,   # PER予（IRBANKの数字）
-        "eps_fwd": eps_fwd,   # 予想EPS（close / per_fwd で計算）
+        "per_fwd": per_fwd,   # 予想PER
+        "eps_fwd": eps_fwd,   # 予想EPS
     }
