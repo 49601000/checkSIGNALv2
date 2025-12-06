@@ -35,8 +35,8 @@ def render_app():
     low_52w = base["low_52w"]
     company_name = base["company_name"]
     dividend_yield = base["dividend_yield"]
-    eps = base["eps"]
-    bps = base["bps"]
+    eps = base.get("eps")
+    bps = base.get("bps")
 
     # ------------ テクニカル指標 + PER/PBR ------------
     try:
