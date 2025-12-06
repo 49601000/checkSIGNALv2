@@ -133,100 +133,100 @@ def render_app():
     # ================================
     # 🟦 Tタブ：押し目・タイミング + 裁量レンジ
     # ================================
-with tab_t:
-    st.subheader("⏰ T（タイミング）")
+    with tab_t:
+        st.subheader("⏰ T（タイミング）")
 
-    # ★ タイミング評価を大きめ・青で強調表示
-    st.metric("Tスコア（タイミング）", f"{t_score:.1f} / 100")
+        # ★ タイミング評価を大きめ・青で強調表示
+        st.metric("Tスコア（タイミング）", f"{t_score:.1f} / 100")
 
-    st.markdown(
-        f"""
-        <div style="font-size:1.2rem; color:#0066cc; font-weight:bold;">
-            タイミング評価: {timing_label}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        st.markdown(
+            f"""
+            <div style="font-size:1.2rem; color:#0066cc; font-weight:bold;">
+                タイミング評価: {timing_label}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    st.markdown("---")
-    st.markdown("### 📌 裁量買いレンジ（目安）")
+        st.markdown("---")
+        st.markdown("### 📌 裁量買いレンジ（目安）")
 
-    trend_conditions = tech.get("trend_conditions", [False, False, False])
-    contrarian_conditions = tech.get("contrarian_conditions", [False, False, False])
-    qvt_good = qvt_score >= 60
+        trend_conditions = tech.get("trend_conditions", [False, False, False])
+        contrarian_conditions = tech.get("contrarian_conditions", [False, False, False])
+        qvt_good = qvt_score >= 60
 
-    # 順張りモードかどうか（25 > 50 > 75 or t_mode == "trend"）
-    is_trend_mode = tech.get("t_mode") == "trend" or trend_conditions[0]
+        # 順張りモードかどうか（25 > 50 > 75 or t_mode == "trend"）
+        is_trend_mode = tech.get("t_mode") == "trend" or trend_conditions[0]
 
-    if is_trend_mode:
-        mode_label = "📈 順張り（上昇トレンド押し目狙い）"
+        if is_trend_mode:
+            mode_label = "📈 順張り（上昇トレンド押し目狙い）"
 
-        mid_trend_ok = "○" if trend_conditions[0] else "×"
-        short_trend_ok = "○" if trend_conditions[1] else "×"
-        qvt_ok = "○" if qvt_good else "×"
+            mid_trend_ok = "○" if trend_conditions[0] else "×"
+            short_trend_ok = "○" if trend_conditions[1] else "×"
+            qvt_ok = "○" if qvt_good else "×"
 
-        center_price = (tech["ma25"] + tech["ma50"]) / 2
-        upper_price = center_price * 1.03
-        lower_price = max(center_price * 0.95, tech["bb_lower1"])
+            center_price = (tech["ma25"] + tech["ma50"]) / 2
+            upper_price = center_price * 1.03
+            lower_price = max(center_price * 0.95, tech["bb_lower1"])
 
-        comment_text = tech.get("trend_comment", "買い検討コメントなし")
+            comment_text = tech.get("trend_comment", "買い検討コメントなし")
 
-        mid_trend_text = "25MA ＞ 50MA ＞ 75MA"
-        short_trend_text = "MA25 横ばい〜緩やか上昇"
+            mid_trend_text = "25MA ＞ 50MA ＞ 75MA"
+            short_trend_text = "MA25 横ばい〜緩やか上昇"
 
-    else:
-        mode_label = "🧮 逆張り（下落 or 調整局面の押し目狙い）"
+        else:
+            mode_label = "🧮 逆張り（下落 or 調整局面の押し目狙い）"
 
-        mid_trend_ok = "○" if contrarian_conditions[0] else "×"
-        short_trend_ok = "○" if contrarian_conditions[1] else "×"
-        qvt_ok = "○" if qvt_good else "×"
+            mid_trend_ok = "○" if contrarian_conditions[0] else "×"
+            short_trend_ok = "○" if contrarian_conditions[1] else "×"
+            qvt_ok = "○" if qvt_good else "×"
 
-        center_price = (tech["ma25"] + tech["bb_lower1"]) / 2
-        upper_price = center_price * 1.08
-        lower_price = center_price * 0.97
+            center_price = (tech["ma25"] + tech["bb_lower1"]) / 2
+            upper_price = center_price * 1.08
+            lower_price = center_price * 0.97
 
-        comment_text = tech.get("contr_comment", "逆張りコメントなし")
+            comment_text = tech.get("contr_comment", "逆張りコメントなし")
 
-        mid_trend_text = "下降 or 横ばい（or MA接近）"
-        short_trend_text = "MA25 下降"
+            mid_trend_text = "下降 or 横ばい（or MA接近）"
+            short_trend_text = "MA25 下降"
 
-    # ① モード表示
-    st.markdown(f"**モード**: {mode_label}")
+        # ① モード表示
+        st.markdown(f"**モード**: {mode_label}")
 
-    # ② 環境チェック（〇×）テーブル
-    st.markdown(
-        f"""
-| 項目 | 内容 | 判定 |
-|---|---|:---:|
-| 中期トレンド | {mid_trend_text} | {mid_trend_ok} |
-| 短期傾向 | {short_trend_text} | {short_trend_ok} |
-| 総合力 | QVTスコア ≧ 60 | {qvt_ok} |
-        """
-    )
+        # ② 環境チェック（〇×）テーブル
+        st.markdown(
+            f"""
+    | 項目 | 内容 | 判定 |
+    |---|---|:---:|
+    | 中期トレンド | {mid_trend_text} | {mid_trend_ok} |
+    | 短期傾向 | {short_trend_text} | {short_trend_ok} |
+    | 総合力 | QVTスコア ≧ 60 | {qvt_ok} |
+            """
+        )
 
-    # ★ コメントを大きめ・青で強調表示
-    st.markdown(
-        f"""
-        <div style="font-size:1.1rem; color:#0066cc; font-weight:bold; margin-top:0.5rem;">
-            コメント: {comment_text}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        # ★ コメントを大きめ・青で強調表示
+        st.markdown(
+            f"""
+            <div style="font-size:1.1rem; color:#0066cc; font-weight:bold; margin-top:0.5rem;">
+                コメント: {comment_text}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # ③ 中心価格 + レンジ
-    st.markdown(
-        f"""
-中心価格（目安）: **{center_price:.2f}**  
-買い検討レンジ（目安）: **{lower_price:.2f} 〜 {upper_price:.2f}**
-        """
-    )
-
-    st.info(
-        "※ 環境チェック（〇×）と裁量買いレンジは、"
-        "タイミングとトレンド・QVTスコアを組み合わせた“目安”です。"
-        "実際のエントリーはポジションサイズやPF全体のバランスも加味して判断してください。"
-    )
+        # ③ 中心価格 + レンジ
+        st.markdown(
+            f"""
+    中心価格（目安）: **{center_price:.2f}**  
+    買い検討レンジ（目安）: **{lower_price:.2f} 〜 {upper_price:.2f}**
+            """
+        )
+    
+        st.info(
+            "※ 環境チェック（〇×）と裁量買いレンジは、"
+            "タイミングとトレンド・QVTスコアを組み合わせた“目安”です。"
+            "実際のエントリーはポジションサイズやPF全体のバランスも加味して判断してください。"
+        )
 
 
     # ================================
