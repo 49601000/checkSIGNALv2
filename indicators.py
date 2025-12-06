@@ -112,6 +112,8 @@ def compute_indicators(
     low_52w: float,
     eps: Optional[float] = None,
     bps: Optional[float] = None,
+    eps_fwd: Optional[float] = None,
+    per_fwd: Optional[float] = None,
 ):
     """
     df に各種テクニカル指標を追加し、判定に必要な値をまとめて返す。
@@ -168,12 +170,19 @@ def compute_indicators(
     arrow75 = slope_arrow(df["75MA"])
 
     # === PER / PBR 計算 ===
+    #実績 PER
     per: Optional[float] = None
     pbr: Optional[float] = None
     if eps not in (None, 0):
         per = price / eps
     if bps not in (None, 0):
         pbr = price / bps
+    # 予想 PER（IRBANK にある数字を優先し、なければ eps_fwd から計算）
+    per_fwd_calc = None
+    if per_fwd not in (None, 0):
+        per_fwd_calc = per_fwd
+    elif eps_fwd not in (None, 0):
+        per_fwd_calc = price / eps_fwd
 
     # === BB 判定 ===
     bb_text, bb_icon, bb_strength = judge_bb_signal(
