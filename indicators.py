@@ -153,6 +153,95 @@ def judge_signal(
     else:
         return "押し目シグナルなし", "🟢", 0
 
+# ============================================================
+# タイミング用のヘルパー関数を追加
+# ============================================================
+
+def _score_timing_trend(
+    highprice_score: float,
+    low_score: float,
+    signal_strength: int,
+    price: float,
+    high_52w: float,
+    bb_upper1: float,
+    per: Optional[float],
+    pbr: Optional[float],
+) -> tuple[float, str, bool]:
+    """
+    順張り局面用：タイミングスコア T（0〜100）とラベル、 高値掴みフラグを返す。
+    """
+    # 割安度（押し目度）0〜1
+    low_norm = max(0.0, min(low_score / 85.0, 1.0))
+    # 押し目シグナル強度（0〜3）→ 0〜1
+    sig_norm = max(0.0, min(signal_strength / 3.0, 1.0))
+
+    # ベースは「中立〜軽い押し目」あたり（50点）
+    t = 50.0 + 40.0 * sig_norm + 10.0 * low_norm  # 最大でほぼ 100
+
+    # 高値掴みリスク判定（highprice_score が低いほど危険）
+    high_price_alert = False
+    if highprice_score <= 40:
+        high_price_alert = True
+    # ついでに「52週高値付近」「BB+1σ超え」「超高PER/PBR」も危険扱いにしてもOK
+    if high_52w and price >= high_52w * 0.97:
+        high_price_alert = True
+    if price >= bb_upper1:
+        high_price_alert = True
+    if per is not None and per > 35:
+        high_price_alert = True
+    if pbr is not None and pbr > 3.5:
+        high_price_alert = True
+
+    # 高値掴みリスクが立っているときは T を 40 点以下にキャップ
+    if high_price_alert and t > 40.0:
+        t = 40.0
+
+    # ラベル付け
+    if t <= 25:
+        label = "高値圏（要注意）"
+    elif t <= 50:
+        label = "押し目シグナルなし"
+    elif t <= 80:
+        label = "そこそこ押し目"
+    else:
+        label = "バーゲン（強い押し目）"
+
+    return t, label, high_price_alert
+
+
+def _score_timing_contrarian(
+    low_score: float,
+    highprice_score: float,
+) -> tuple[float, str, bool]:
+    """
+    逆張り局面用：タイミングスコア T（0〜100）とラベル、高値掴みフラグを返す。
+    ※ここでは low_score（割安度）だけを見る。
+    """
+    # 割安度 0〜1
+    low_norm = max(0.0, min(low_score / 85.0, 1.0))
+
+    # ベース 40点（＝押し目シグナルなし）
+    # そこから割安になるほど 100 点に近づく
+    t = 40.0 + 60.0 * low_norm   # low_score=0 → 40, max → 100
+
+    # highprice_score が低いときは「逆張りにすら乗りたくない高値圏」とみなしてキャップ
+    high_price_alert = False
+    if highprice_score <= 40:
+        high_price_alert = True
+    if high_price_alert and t > 40.0:
+        t = 40.0
+
+    # ラベル付け
+    if t <= 25:
+        label = "高値圏（要注意）"
+    elif t <= 50:
+        label = "押し目シグナルなし"
+    elif t <= 80:
+        label = "そこそこ押し目"
+    else:
+        label = "バーゲン（強い押し目）"
+
+    return t, label, high_price_alert
 
 # ============================================================
 # Q（ビジネスの質）スコア
@@ -507,22 +596,16 @@ def compute_indicators(
         high_price_alert = True
 
     # === 順張り・逆張りスコア（従来のブル／ベア）===
+    # === 順張り・逆張りスコア（既存） ===
     highprice_score = is_high_price_zone(
-        price, ma25, ma50, bb_upper1, rsi, per, pbr, high_52w
+        price, ma25, ma50, bb_upper1, rsi,
+        per, pbr, high_52w
     )
     low_score = is_low_price_zone(
-        price,
-        ma25,
-        ma50,
-        bb_lower1,
-        bb_lower2,
-        rsi,
-        per,
-        pbr,
-        low_52w,
+        price, ma25, ma50, bb_lower1, bb_lower2,
+        rsi, per, pbr, low_52w
     )
 
-    # === トレンド・逆張り条件 ===
     trend_conditions = [
         ma75 < ma50 < ma25,
         is_flat_or_gentle_up,
@@ -548,6 +631,26 @@ def compute_indicators(
         "買い検討の余地があります。",
         "買い候補として非常に魅力的です。",
     ][contr_ok]
+
+    # === タイミングスコア T（QVT 用） ===
+    if trend_conditions[0]:  # 25MA > 50MA > 75MA → 順張りモード
+        t_score, timing_label, high_price_alert = _score_timing_trend(
+            highprice_score=highprice_score,
+            low_score=low_score,
+            signal_strength=signal_strength,
+            price=price,
+            high_52w=high_52w,
+            bb_upper1=bb_upper1,
+            per=per,
+            pbr=pbr,
+        )
+    else:
+        # それ以外は逆張りモードとして扱う
+        t_score, timing_label, high_price_alert = _score_timing_contrarian(
+            low_score=low_score,
+            highprice_score=highprice_score,
+        )
+
 
     # === Q / V スコア ===
     q_score = _score_quality(roe, roa, equity_ratio)
