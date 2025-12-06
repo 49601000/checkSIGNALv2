@@ -73,7 +73,7 @@ def render_app():
     pbr_val = tech.get("pbr")
     per_str = f"{per_val:.2f}倍" if per_val is not None else "—"
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val is not None else "—"
-    per_fwd_val = tech.get("per_fwd_")
+    per_fwd_val = tech.get("per_fwd")
     pbr_fwd_val = tech.get("pbr_fwd")
     per__fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
     pbr_fwd_str = f"{pbr_fwd_val:.2f}倍" if pbr_fwd_val is not None else "—"
