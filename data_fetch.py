@@ -163,49 +163,86 @@ def get_eps_bps_irbank(
 def get_us_eps_bps_from_fmp(
     symbol: str,
     api_key: Optional[str] = None,
+    debug: bool = True,          # ★ デフォルトでデバッグ ON
 ) -> Tuple[Optional[float], Optional[float]]:
     """
     FMP /ratios-ttm から epsTTM / bvpsTTM を取得。
     PER/PBR は compute_indicators 側で price/eps, price/bps から計算する。
+
+    debug=True のときは Streamlit 上にレスポンスの中身を出す。
     """
     key = api_key or FMP_API_KEY
     if not key:
-        print("[FMP] API key not set")
+        msg = "[FMP] API key not set"
+        print(msg)
+        if debug:
+            st.warning(msg)
         return None, None
 
     url = f"{FMP_BASE}/ratios-ttm/{symbol}?apikey={key}"
-    print(f"[FMP] request -> {url}")
+
+    # ★ ここで URL をそのまま確認できるようにしておく
+    if debug:
+        st.write("🔍 FMP request URL:", url)
 
     try:
         resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
     except Exception as e:
-        print(f"[FMP] request error ({symbol}): {e}")
+        msg = f"[FMP] request error ({symbol}): {e}"
+        print(msg)
+        if debug:
+            st.error(msg)
         return None, None
 
+    if debug:
+        st.write("FMP status code:", resp.status_code)
+        st.write("FMP raw response (head):", resp.text[:500])
+
+    # HTTP ステータスが 200 以外ならここで終了
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        msg = f"[FMP] HTTP error ({symbol}): {e}"
+        print(msg)
+        if debug:
+            st.error(msg)
+        return None, None
+
+    # JSON 解析
     try:
         data = resp.json()
     except Exception as e:
-        print(f"[FMP] json error ({symbol}): {e}, text={resp.text[:200]}")
+        msg = f"[FMP] json error ({symbol}): {e}"
+        print(msg)
+        if debug:
+            st.error(msg)
         return None, None
 
-    # 期待する形式: [ { ...ratios... } ]
+    if debug:
+        st.write("FMP parsed JSON:", data)
+
+    # 想定は list[dict] 形式
     if not isinstance(data, list) or not data:
-        print(f"[FMP] unexpected payload ({symbol}): {data}")
+        msg = f"[FMP] unexpected payload ({symbol}): {data}"
+        print(msg)
+        if debug:
+            st.warning(msg)
         return None, None
 
     ratios = data[0] or {}
 
-    # どちらか存在する方を採用（プランや銘柄でキー名が違う可能性を考慮）
+    # キー名はいくつかパターンがあるので OR で順に見る
     eps_ttm = ratios.get("epsTTM") or ratios.get("netIncomePerShareTTM")
     bps_ttm = ratios.get("bvpsTTM") or ratios.get("bookValuePerShareTTM")
 
-    print(f"[FMP] parsed ({symbol}) eps={eps_ttm}, bps={bps_ttm}")
+    if debug:
+        st.write("FMP extracted fields:",
+                 {"epsTTM": eps_ttm, "bvpsTTM": bps_ttm})
 
     eps = float(eps_ttm) if eps_ttm not in (None, "", 0) else None
     bps = float(bps_ttm) if bps_ttm not in (None, "", 0) else None
-    return eps, bps
 
+    return eps, bps
 
 # -----------------------------------------------------------
 # メイン：価格 + メタ情報 + EPS/BPS/予想EPS
