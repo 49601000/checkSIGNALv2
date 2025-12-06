@@ -308,7 +308,7 @@ def get_price_and_meta(
             eps_fwd = close / per_fwd
     else:
         # 米国銘柄など → FMP の ratios-ttm から EPS/BPS を取得
-        eps, bps = get_us_eps_bps_from_fmp(ticker)
+        eps, bps = get_us_eps_bps_from_fmp(ticker,dubug=True)
 
     return {
         "df": df,
