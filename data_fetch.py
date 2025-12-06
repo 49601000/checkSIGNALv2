@@ -48,14 +48,19 @@ def is_jpx_ticker(ticker: str) -> bool:
 # 配当利回り（yfinance）
 # -----------------------------------------------------------
 def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[float]:
+    """
+    yfinance.Ticker.dividends から過去 1 年分の配当利回り（％）を計算。
+    """
     divs = ticker_obj.dividends
 
     if not isinstance(divs, pd.Series) or len(divs) == 0 or close <= 0:
         return None
 
+    # index を datetime64[ns] に統一
     divs.index = pd.to_datetime(divs.index, errors="coerce")
     divs = divs.dropna()
 
+    # タイムゾーン除去
     try:
         if getattr(divs.index, "tz", None) is not None:
             divs.index = divs.index.tz_localize(None)
@@ -77,6 +82,9 @@ def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[flo
 # 銘柄名取得
 # -----------------------------------------------------------
 def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
+    """
+    yfinance.info から銘柄名を取得。なければティッカーで代用。
+    """
     name = None
     try:
         info = ticker_obj.info or {}
@@ -93,6 +101,12 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 def get_eps_bps_irbank(
     code: str,
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    IRBANK の『株式情報 / 指標』ページから
+    - EPS（連 or 単） → 実績EPS
+    - BPS（連 or 単） → 実績BPS
+    - PER予           → 予想PER
+    """
     url = f"{IRBANK_BASE}{code}"
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -114,6 +128,7 @@ def get_eps_bps_irbank(
             return None
 
         cur = node
+        # node 自身 + その後ろ数ノードをチェックして数値を探す
         for _ in range(8):
             if cur is None:
                 break
@@ -174,12 +189,14 @@ def get_us_eps_bps_from_fmp(
         print(f"[FMP] json error ({symbol}): {e}, text={resp.text[:200]}")
         return None, None
 
+    # 期待する形式: [ { ...ratios... } ]
     if not isinstance(data, list) or not data:
         print(f"[FMP] unexpected payload ({symbol}): {data}")
         return None, None
 
     ratios = data[0] or {}
 
+    # どちらか存在する方を採用（プランや銘柄でキー名が違う可能性を考慮）
     eps_ttm = ratios.get("epsTTM") or ratios.get("netIncomePerShareTTM")
     bps_ttm = ratios.get("bvpsTTM") or ratios.get("bookValuePerShareTTM")
 
@@ -204,6 +221,7 @@ def get_price_and_meta(
     - JPX: IRBANK から EPS/BPS/PER予 → 予想EPS を逆算
     - それ以外（米国株など）：FMP から epsTTM/bvpsTTM
     """
+    # --- 株価データ ---
     try:
         df = yf.download(ticker, period=period, interval=interval)
     except Exception as e:
@@ -212,9 +230,11 @@ def get_price_and_meta(
     if df.empty:
         raise ValueError("株価データが取得できませんでした。")
 
+    # yfinance のマルチカラム対応
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join(col).strip() for col in df.columns]
 
+    # Close 列特定
     try:
         close_col = next(c for c in df.columns if "Close" in c)
     except StopIteration:
@@ -226,24 +246,31 @@ def get_price_and_meta(
     close = float(df[close_col].iloc[-1])
     previous_close = float(df[close_col].iloc[-2])
 
+    # 52週高値・安値（取得期間内で代用）
     high_52w = float(df[close_col].max())
     low_52w = float(df[close_col].min())
 
+    # --- yfinance.Ticker（銘柄名 + 配当利回り）---
     ticker_obj = yf.Ticker(ticker)
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
+    # --- ファンダメンタル関連 ---
     eps: Optional[float] = None
     bps: Optional[float] = None
     per_fwd: Optional[float] = None
     eps_fwd: Optional[float] = None
 
     if is_jpx_ticker(ticker):
+        # "2801.T" -> "2801" に変換して IRBANK に投げる
         code_for_irbank = ticker.replace(".T", "") if ticker.endswith(".T") else ticker
         eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
+
+        # 予想PERが取れていて株価も正なら、そこから予想EPSを逆算
         if per_fwd not in (None, 0.0) and close > 0:
             eps_fwd = close / per_fwd
     else:
+        # 米国銘柄など → FMP の ratios-ttm から EPS/BPS を取得
         eps, bps = get_us_eps_bps_from_fmp(ticker)
 
     return {
@@ -255,8 +282,9 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        "eps": eps,
-        "bps": bps,
-        "per_fwd": per_fwd,
-        "eps_fwd": eps_fwd,
+        # IRBANK / FMP からのファンダメンタル
+        "eps": eps,          # 実績EPS
+        "bps": bps,          # 実績BPS
+        "per_fwd": per_fwd,  # JPX: PER予
+        "eps_fwd": eps_fwd,  # JPX: 予想EPS
     }
