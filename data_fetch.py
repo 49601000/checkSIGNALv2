@@ -13,11 +13,13 @@ import streamlit as st
 # 定数
 # -----------------------------------------------------------
 IRBANK_BASE = "https://irbank.net/"
-# ★ FMP は stable エンドポイントを使う
-FMP_BASE_STABLE = "https://financialmodelingprep.com/stable"
+ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
 
-# Streamlit Secrets から API キー取得
-FMP_API_KEY: Optional[str] = st.secrets.get("FMP_API_KEY")
+# Streamlit Secrets から Alpha Vantage の API キー取得
+# ★ Streamlit の secrets.toml には例えば
+#   ALPHA_VANTAGE_API_KEY = "xxxxx"
+# のように設定しておく
+ALPHA_VANTAGE_API_KEY: Optional[str] = st.secrets.get("ALPHA_VANTAGE_API_KEY")
 
 
 # -----------------------------------------------------------
@@ -159,92 +161,73 @@ def get_eps_bps_irbank(
 
 
 # -----------------------------------------------------------
-# FMP から EPS/BPS（米株など）: stable/ratios-ttm
+# Alpha Vantage から EPS/BPS（米株など）
 # -----------------------------------------------------------
-def get_us_eps_bps_from_fmp(
+def get_us_eps_bps_from_alpha_vantage(
     symbol: str,
     api_key: Optional[str] = None,
     debug: bool = False,
 ) -> Tuple[Optional[float], Optional[float]]:
     """
-    FMP の stable /ratios-ttm から epsTTM / bvpsTTM を取得。
+    Alpha Vantage の OVERVIEW エンドポイントから EPS / BookValue を取得。
+    - function=OVERVIEW
+    - EPS             → 実績EPS
+    - BookValue       → BPS（1株あたり簿価）
 
-    ※ free プラン or endpoint 権限によっては 403 が返り、
-      その場合は (None, None) を返す。
+    レート制限（5req/min, 100req/day）にかかった場合は
+    'Note' などが返るので、そのときは (None, None) を返す。
     """
-    key = api_key or FMP_API_KEY
+    key = api_key or ALPHA_VANTAGE_API_KEY
     if not key:
         if debug:
-            print("[FMP] API key not set")
+            print("[AV] API key not set")
         return None, None
 
-    # stable エンドポイント（docs 仕様に合わせて symbol= クエリ形式）
-    url = f"{FMP_BASE_STABLE}/ratios-ttm?symbol={symbol}&apikey={key}"
-
-    if debug:
-        print(f"[FMP] request -> {url}")
+    params = {
+        "function": "OVERVIEW",
+        "symbol": symbol,
+        "apikey": key,
+    }
 
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(ALPHA_VANTAGE_BASE, params=params, timeout=10)
     except Exception as e:
         if debug:
-            print(f"[FMP] request failed ({symbol}): {e}")
+            print(f"[AV] request failed ({symbol}): {e}")
         return None, None
 
     if debug:
-        print(f"[FMP] status={resp.status_code}")
-        # 403 のときのメッセージ確認用
-        try:
-            print(resp.text[:200])
-        except Exception:
-            pass
-
-    # 403 はほぼ権限エラーなので素直に諦める
-    if resp.status_code == 403:
-        return None, None
-
-    try:
-        resp.raise_for_status()
-    except Exception as e:
-        if debug:
-            print(f"[FMP] HTTP error ({symbol}): {e}")
-        return None, None
+        print(f"[AV] status={resp.status_code}")
 
     try:
         data = resp.json()
     except Exception as e:
         if debug:
-            print(f"[FMP] json error ({symbol}): {e}, text={resp.text[:200]}")
+            print(f"[AV] json error ({symbol}): {e}, text={resp.text[:200]}")
         return None, None
 
-    # stable 側の返却形式が list or {"ratiosTTM":[...]} の両対応
-    if isinstance(data, dict) and "ratiosTTM" in data:
-        records = data.get("ratiosTTM") or []
-    elif isinstance(data, list):
-        records = data
-    else:
+    # レート制限やエラー時は "Note" や "Information" が返る
+    if not isinstance(data, dict) or "EPS" not in data:
         if debug:
-            print(f"[FMP] unexpected payload ({symbol}): {data}")
+            print(f"[AV] unexpected payload ({symbol}): {data}")
         return None, None
 
-    if not records:
-        return None, None
-
-    ratios = records[0] or {}
-
-    eps_ttm = ratios.get("epsTTM") or ratios.get("netIncomePerShareTTM")
-    bps_ttm = ratios.get("bvpsTTM") or ratios.get("bookValuePerShareTTM")
+    eps_raw = data.get("EPS")
+    bps_raw = data.get("BookValue")  # OVERVIEW のフィールド名
 
     if debug:
-        print(f"[FMP] parsed ({symbol}) eps={eps_ttm}, bps={bps_ttm}")
+        print(f"[AV] parsed ({symbol}) EPS={eps_raw}, BookValue={bps_raw}")
+
+    eps: Optional[float]
+    bps: Optional[float]
 
     try:
-        eps = float(eps_ttm) if eps_ttm not in (None, "", 0) else None
+        eps = float(eps_raw) if eps_raw not in (None, "", "None") else None
     except (TypeError, ValueError):
         eps = None
 
     try:
-        bps = float(bps_ttm) if bps_ttm not in (None, "", 0) else None
+        bps = float(bps_raw) if bps_raw not in (None, "", "None") else None
     except (TypeError, ValueError):
         bps = None
 
@@ -264,7 +247,7 @@ def get_price_and_meta(
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
     - JPX: IRBANK から EPS/BPS/PER予 → 予想EPS を逆算
-    - それ以外（米国株など）：FMP stable/ratios-ttm → EPS/BPS
+    - それ以外（米国株など）：Alpha Vantage OVERVIEW → EPS / BookValue
       取得できなければ yfinance.info からの簡易計算にフォールバック
     """
     # --- 価格データ（yfinance.download）---
@@ -316,10 +299,10 @@ def get_price_and_meta(
             eps_fwd = close / per_fwd
 
     else:
-        # 米国株など：まず FMP stable を試す
-        eps, bps = get_us_eps_bps_from_fmp(ticker, debug=debug)
+        # 米国株など：まず Alpha Vantage を試す
+        eps, bps = get_us_eps_bps_from_alpha_vantage(ticker, debug=debug)
 
-        # FMP で取れなかった場合は yfinance.info から簡易計算で補完
+        # Alpha Vantage で取れなかった場合は yfinance.info から簡易計算で補完
         if eps is None or bps is None:
             try:
                 info = ticker_obj.info or {}
@@ -349,7 +332,13 @@ def get_price_and_meta(
     if debug:
         print(
             "[DEBUG fundamentals]",
-            {"ticker": ticker, "eps": eps, "bps": bps, "eps_fwd": eps_fwd, "per_fwd": per_fwd},
+            {
+                "ticker": ticker,
+                "eps": eps,
+                "bps": bps,
+                "eps_fwd": eps_fwd,
+                "per_fwd": per_fwd,
+            },
         )
 
     return {
