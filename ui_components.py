@@ -55,10 +55,26 @@ def render_app():
     st.markdown("---")
     st.markdown(f"## 📌 {ticker}（{company_name}）")
 
+    # PER / PBR 表示用の文字列
+    per_str = "—"
+    pbr_str = "—"
+    if tech["per"] is not None:
+        per_str = f"{tech['per']:.2f}倍"
+    if tech["pbr"] is not None:
+        pbr_str = f"{tech['pbr']:.2f}倍"
+
     st.markdown(
         f"""
 **現在価格**: <span style='color:{price_color}; font-weight:bold;'>{close:.2f}</span>  
 （前日終値: {previous_close:.2f}）  
+
+**PER**: {per_str} ｜ **PBR**: {pbr_str}  
+
+**25MA**: {tech["ma25"]:.2f} {tech["arrow25"]} ｜ **50MA**: {tech["ma50"]:.2f} {tech["arrow50"]} ｜ **75MA**: {tech["ma75"]:.2f} {tech["arrow75"]}
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 **25MA**: {tech["ma25"]:.2f} {tech["arrow25"]} ｜ **50MA**: {tech["ma50"]:.2f} {tech["arrow50"]} ｜ **75MA**: {tech["ma75"]:.2f} {tech["arrow75"]}
         """,
