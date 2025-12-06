@@ -1,4 +1,3 @@
-# data_fetch.py
 from typing import Optional, Tuple
 import re
 import requests
@@ -79,21 +78,28 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 
 
 # -----------------------------------------------------------
-# IRBANK から EPS / BPS を取得
+# IRBANK から 実績EPS / BPS / PER予 を取得
 # -----------------------------------------------------------
-def get_eps_bps_irbank(code: str) -> Tuple[Optional[float], Optional[float]]:
+def get_eps_bps_irbank(
+    code: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    IRBANK の『株式情報』ページから EPS（連）/ BPS（連） を 1 回だけ取得する。
+    IRBANK の『株式情報 / 指標』ページから
+    - EPS（連 or 単）    → 実績EPS
+    - BPS（連 or 単）    → 実績BPS
+    - PER予              → 予想PER
+
+    を 1 回のリクエストで取得する。
 
     Parameters
     ----------
     code : str
-        '2801' のような数値 4 桁〜5 桁部分を想定（'.T' などは付けない）
+        '2801' のような数値 4〜5 桁部分を想定（'.T' などは付けない）
 
     Returns
     -------
-    (eps, bps) : (Optional[float], Optional[float])
-        取得できなかった場合は None
+    (eps_actual, bps_actual, per_fwd)
+        いずれか取得できない場合は None
     """
     url = f"{IRBANK_BASE}{code}"
     headers = {
@@ -107,13 +113,13 @@ def get_eps_bps_irbank(code: str) -> Tuple[Optional[float], Optional[float]]:
     except Exception as e:
         # Streamlit のログ用
         print(f"[IRBANK] request error ({code}): {e}")
-        return None, None
+        return None, None, None
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
     def extract_number_after(label: str) -> Optional[float]:
         """
-        ページ内で label（例: 'EPS（連）'）にマッチするテキストを見つけ、
+        ページ内で label（例: 'EPS（連）', 'PER予'）にマッチするテキストを見つけ、
         その直後付近の文字列から「数字っぽいところ」を抜き出して float 化する。
         """
         node = soup.find(string=re.compile(re.escape(label)))
@@ -121,8 +127,8 @@ def get_eps_bps_irbank(code: str) -> Tuple[Optional[float], Optional[float]]:
             return None
 
         cur = node
-        # 近くのテキストノードを 6 ステップくらいまで探索して数字を探す
-        for _ in range(6):
+        # 近くのテキストノードを数ステップ探索して数字を探す
+        for _ in range(8):
             cur = cur.find_next(string=True)
             if not cur:
                 break
@@ -146,11 +152,14 @@ def get_eps_bps_irbank(code: str) -> Tuple[Optional[float], Optional[float]]:
         or extract_number_after("BPS")
     )
 
-    return eps, bps
+    # PER予（予想PER）。IRBANK 上では「PER予」と表示されている想定。
+    per_fwd = extract_number_after("PER予")
+
+    return eps, bps, per_fwd
 
 
 # -----------------------------------------------------------
-# メイン：価格 + メタ情報 + EPS/BPS 取得
+# メイン：価格 + メタ情報 + EPS/BPS/予想EPS 取得
 # -----------------------------------------------------------
 def get_price_and_meta(
     ticker: str,
@@ -161,7 +170,8 @@ def get_price_and_meta(
     株価データとメタ情報を取得して返す。
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
-    - 日本株コードなら IRBANK で EPS/BPS
+    - 日本株コードなら IRBANK で 実績EPS / BPS / PER予 を取得し、
+      そこから予想EPSも計算する。
 
     失敗時は ValueError を投げる。
     """
@@ -200,8 +210,10 @@ def get_price_and_meta(
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
     # --- IRBANK（日本株のみ）---
-    eps: Optional[float] = None
-    bps: Optional[float] = None
+    eps: Optional[float] = None          # 実績EPS
+    bps: Optional[float] = None          # 実績BPS
+    per_fwd: Optional[float] = None      # PER予
+    eps_fwd: Optional[float] = None      # 予想EPS（アプリ側で計算）
 
     code_for_irbank: Optional[str] = None
     if ticker.endswith(".T"):
@@ -211,7 +223,10 @@ def get_price_and_meta(
         code_for_irbank = ticker
 
     if code_for_irbank is not None:
-        eps, bps = get_eps_bps_irbank(code_for_irbank)
+        eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
+        # 予想PERが取れていて株価も正なら、そこから予想EPSを逆算
+        if per_fwd not in (None, 0.0) and close > 0:
+            eps_fwd = close / per_fwd
 
     return {
         "df": df,
@@ -222,6 +237,9 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        "eps": eps,   # ← IRBANK の結果（日本株なら値が入る想定）
-        "bps": bps,
+        # IRBANK 系
+        "eps": eps,           # 実績EPS
+        "bps": bps,           # 実績BPS
+        "per_fwd": per_fwd,   # PER予（IRBANKの数字）
+        "eps_fwd": eps_fwd,   # 予想EPS（close / per_fwd で計算）
     }
