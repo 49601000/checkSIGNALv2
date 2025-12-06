@@ -1,17 +1,19 @@
 # data_fetch.py
 from typing import Optional, Tuple
+import re
 from datetime import datetime, timedelta
+import os
 
 import requests
+from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
-import streamlit as st  # FMPのAPIキーをst.secretsから取得
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
+IRBANK_BASE = "https://irbank.net/"
 
 
 # -----------------------------------------------------------
-# ティッカー補正（日本株コードの場合に .T を付与）
+# ティッカー補正
 # -----------------------------------------------------------
 def convert_ticker(ticker: str) -> str:
     """
@@ -59,7 +61,7 @@ def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[flo
 
 
 # -----------------------------------------------------------
-# 銘柄名取得（yfinance.info）
+# 銘柄名取得
 # -----------------------------------------------------------
 def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
     """
@@ -75,128 +77,187 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
     return name or fallback_ticker
 
 
-# ===========================================================
-# FMP 共通ラッパー
-# ===========================================================
-def _fmp_get(path: str, api_key: str, params: Optional[dict] = None):
+# -----------------------------------------------------------
+# IRBANK から 実績EPS / BPS / PER予 を取得（日本株用）
+# -----------------------------------------------------------
+def get_eps_bps_irbank(
+    code: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    FMP の共通 GET ラッパー。失敗時は None を返す。
-    """
-    if not api_key:
-        return None
+    IRBANK の『株式情報 / 指標』ページから
+    - EPS（連 or 単）    → 実績EPS
+    - BPS（連 or 単）    → 実績BPS
+    - PER予              → 予想PER
 
-    url = f"{FMP_BASE}{path}"
-    q = {"apikey": api_key}
-    if params:
-        q.update(params)
+    を 1 回のリクエストで取得する。
+
+    Parameters
+    ----------
+    code : str
+        '2801' のような数値 4〜5 桁部分を想定（'.T' などは付けない）
+
+    Returns
+    -------
+    (eps_actual, bps_actual, per_fwd)
+        いずれか取得できない場合は None
+    """
+    url = f"{IRBANK_BASE}{code}"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": IRBANK_BASE,
+    }
 
     try:
-        resp = requests.get(url, params=q, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
-        return resp.json()
     except Exception as e:
-        print(f"[FMP] request error ({path}): {e}")
+        print(f"[IRBANK] request error ({code}): {e}")
+        return None, None, None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    def extract_number_near(label: str) -> Optional[float]:
+        """
+        ページ内で label にマッチするテキストノードを見つけ、
+        そのノード自身と、近くのテキストノードから数字を探して float 化する。
+        """
+        node = soup.find(string=re.compile(re.escape(label)))
+        if not node:
+            return None
+
+        cur = node
+        # node 自身 + その後ろ数ノードをチェック
+        for _ in range(8):
+            if cur is None:
+                break
+
+            text = str(cur)
+            m = re.search(r"([\d,]+(?:\.\d+)?)", text)
+            if m:
+                try:
+                    return float(m.group(1).replace(",", ""))
+                except ValueError:
+                    return None
+
+            cur = cur.find_next(string=True)
+
         return None
 
+    eps = (
+        extract_number_near("EPS（連）")
+        or extract_number_near("EPS（単）")
+        or extract_number_near("EPS")
+    )
+    bps = (
+        extract_number_near("BPS（連）")
+        or extract_number_near("BPS（単）")
+        or extract_number_near("BPS")
+    )
 
-# ===========================================================
-# FMP から EPS / BPS / 予想EPS を取得（US も JPX も共通）
-# ===========================================================
-def get_fundamentals_fmp(
-    symbol: str,
-    price: float,
-    api_key: str,
-) -> Tuple[
-    Optional[float],  # eps
-    Optional[float],  # bps
-    Optional[float],  # eps_fwd
-    Optional[float],  # per
-    Optional[float],  # pbr
-    Optional[float],  # per_fwd
-]:
+    per_fwd = extract_number_near("PER予")
+
+    return eps, bps, per_fwd
+
+
+# -----------------------------------------------------------
+# FMP から EPS/BPS/PER/PBR を取得（主に米国株用）
+# -----------------------------------------------------------
+def fetch_fmp_metrics(
+    ticker: str,
+    api_key: Optional[str],
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     """
-    FMP から実績EPS / BPS / 予想EPSを取得し、
-    そこから PER / PBR / 予想PER も計算する。
+    Financial Modeling Prep の key-metrics-ttm から
+    - epsTTM                     -> EPS
+    - bookValuePerShareTTM      -> BPS
+    - peRatioTTM / peTTM / priceEarningsRatioTTM -> PER
+    - pbRatioTTM / pbTTM / priceToBookRatioTTM   -> PBR
 
-    symbol は "NVDA", "AAPL", "7203.T" など
+    を取る。失敗時は全部 None を返す。
     """
-    eps: Optional[float] = None
-    bps: Optional[float] = None
-    eps_fwd: Optional[float] = None
-    per: Optional[float] = None
-    pbr: Optional[float] = None
-    per_fwd: Optional[float] = None
+    if not api_key:
+        return None, None, None, None
 
-    # --- 実績 EPS: income-statement ---
-    income = _fmp_get(f"/income-statement/{symbol}", api_key, {"limit": 1})
-    if isinstance(income, list) and income:
-        row = income[0]
-        raw = row.get("eps") or row.get("epsDiluted")
-        try:
-            if raw not in (None, ""):
-                eps = float(raw)
-        except Exception:
-            eps = None
+    # 東証(.T) はここでは扱わない（IRBANK に任せる）
+    if ticker.endswith(".T"):
+        return None, None, None, None
 
-    # --- BPS: balance-sheet-statement（株主資本 ÷ 発行済株式数） ---
-    bs = _fmp_get(f"/balance-sheet-statement/{symbol}", api_key, {"limit": 1})
-    if isinstance(bs, list) and bs:
-        row = bs[0]
-        equity = row.get("totalStockholdersEquity") or row.get("totalEquity")
-        shares = (
-            row.get("commonStockSharesOutstanding")
-            or row.get("commonSharesOutstanding")
-        )
-        try:
-            if equity not in (None, "") and shares not in (None, "", 0):
-                equity_val = float(equity)
-                shares_val = float(shares)
-                if shares_val > 0:
-                    bps = equity_val / shares_val
-        except Exception:
-            bps = None
+    base = "https://financialmodelingprep.com/api/v3/key-metrics-ttm"
+    url = f"{base}/{ticker}?apikey={api_key}"
 
-    # --- 予想 EPS: analyst-estimates ---
-    estimates = _fmp_get(f"/analyst-estimates/{symbol}", api_key, {"limit": 1})
-    if isinstance(estimates, list) and estimates:
-        row = estimates[0]
-        raw_est = (
-            row.get("estimatedEpsAvg")
-            or row.get("epsAvg")
-            or row.get("estimatedEpsHigh")
-        )
-        try:
-            if raw_est not in (None, ""):
-                eps_fwd = float(raw_est)
-        except Exception:
-            eps_fwd = None
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[FMP] request error ({ticker}): {e}")
+        return None, None, None, None
 
-    # --- PER / PBR / 予想PER 計算 ---
-    if eps not in (None, 0.0) and price > 0:
-        per = price / eps
-    if bps not in (None, 0.0) and price > 0:
-        pbr = price / bps
-    if eps_fwd not in (None, 0.0) and price > 0:
-        per_fwd = price / eps_fwd
+    if not isinstance(data, list) or len(data) == 0:
+        print(f"[FMP] empty response for {ticker}: {data}")
+        return None, None, None, None
 
-    return eps, bps, eps_fwd, per, pbr, per_fwd
+    row = data[0] or {}
+
+    eps = row.get("epsTTM")
+    bps = row.get("bookValuePerShareTTM")
+
+    # PER の候補キーを順番に探す
+    per = (
+        row.get("peRatioTTM")
+        or row.get("peTTM")
+        or row.get("priceEarningsRatioTTM")
+        or row.get("priceEarningsTTM")
+    )
+
+    # PBR の候補キーを順番に探す
+    pbr = (
+        row.get("pbRatioTTM")
+        or row.get("pbTTM")
+        or row.get("priceToBookRatioTTM")
+    )
+
+    try:
+        eps = float(eps) if eps not in (None, "", "NaN") else None
+    except Exception:
+        eps = None
+
+    try:
+        bps = float(bps) if bps not in (None, "", "NaN") else None
+    except Exception:
+        bps = None
+
+    try:
+        per = float(per) if per not in (None, "", "NaN") else None
+    except Exception:
+        per = None
+
+    try:
+        pbr = float(pbr) if pbr not in (None, "", "NaN") else None
+    except Exception:
+        pbr = None
+
+    return eps, bps, per, pbr
 
 
-# ===========================================================
+# -----------------------------------------------------------
 # メイン：価格 + メタ情報 + EPS/BPS/予想EPS 取得
-# ===========================================================
+# -----------------------------------------------------------
 def get_price_and_meta(
     ticker: str,
     period: str = "180d",
     interval: str = "1d",
+    fmp_api_key: Optional[str] = None,
 ):
     """
     株価データとメタ情報を取得して返す。
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
-    - FMP で 実績EPS / BPS / 予想EPS を取得し、
-      そこから PER / PBR / 予想PER も計算する（US も JPX も共通）
+    - 米国株コードなら FMP で EPS/BPS/PER/PBR を取得
+    - 日本株コードなら IRBANK で EPS/BPS/PER予 を取得し、
+      そこから予想EPSも計算する。
 
+    戻り値 dict は indicators.compute_indicators にそのまま渡せる形。
     失敗時は ValueError を投げる。
     """
     # --- 価格データ（yfinance.download）---
@@ -233,26 +294,35 @@ def get_price_and_meta(
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
-    # --- FMP からファンダメンタル取得（US / JP 共通）---
-    fmp_key = None
-    try:
-        fmp_key = st.secrets["FMP_API_KEY"]
-    except Exception:
-        print("[FMP] st.secrets['FMP_API_KEY'] が設定されていません。ファンダ指標は取得しません。")
+    # --- ファンダ系（EPS/BPS/PERなど）---
+    eps: Optional[float] = None          # 実績EPS
+    bps: Optional[float] = None          # 実績BPS
+    per_fwd: Optional[float] = None      # 予想PER or TTM PER
+    eps_fwd: Optional[float] = None      # 予想EPS（IRBANK or FMPから計算用）
+    # pbr をここで直接使うことはないが、将来拡張用に取得しておく
+    pbr_direct: Optional[float] = None
 
-    eps: Optional[float] = None
-    bps: Optional[float] = None
-    eps_fwd: Optional[float] = None
-    per: Optional[float] = None
-    pbr: Optional[float] = None
-    per_fwd: Optional[float] = None
+    # 日本株かどうか
+    is_jp = ticker.endswith(".T") or (ticker.isdigit() and len(ticker) <= 5)
 
-    if fmp_key:
-        eps, bps, eps_fwd, per, pbr, per_fwd = get_fundamentals_fmp(
-            symbol=ticker,
-            price=close,
-            api_key=fmp_key,
-        )
+    if is_jp:
+        # ---- 東証銘柄 → IRBANK ----
+        code_for_irbank = ticker.replace(".T", "")
+        eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
+
+        # 予想PERが取れていて株価も正なら、そこから予想EPSを逆算
+        if per_fwd not in (None, 0.0) and close > 0:
+            eps_fwd = close / per_fwd
+
+    else:
+        # ---- 米国など → FMP ----
+        eps, bps, per_direct, pbr_direct = fetch_fmp_metrics(ticker, fmp_api_key)
+
+        # TTM PER を per_fwd として indicators 側に渡す
+        per_fwd = per_direct
+
+        # eps_fwd は今回は特になし（必要なら将来 FMP の forward EPS を使う）
+        eps_fwd = None
 
     return {
         "df": df,
@@ -263,11 +333,11 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        # FMP 系
-        "eps": eps,           # 実績EPS
-        "bps": bps,           # 実績BPS
-        "eps_fwd": eps_fwd,   # 予想EPS
-        "per": per,           # 実績PER（close / eps）
-        "pbr": pbr,           # 実績PBR（close / bps）
-        "per_fwd": per_fwd,   # 予想PER（close / eps_fwd）
+        # IRBANK / FMP 系
+        "eps": eps,           # 実績EPS (日本=IRBANK, 米=FMP epsTTM)
+        "bps": bps,           # 実績BPS (同上)
+        "per_fwd": per_fwd,   # 日本=IRBANK PER予 / 米=FMP PE TTM
+        "eps_fwd": eps_fwd,   # 日本=close/PER予 / 米=None
+        # 将来 pbr を使いたくなったとき用
+        "pbr_direct": pbr_direct,
     }
