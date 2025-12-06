@@ -144,7 +144,13 @@ def compute_indicators(
     df["RSI"] = 100 - (100 / (1 + (avg_gain / avg_loss)))
 
     # 有効データ
-    df_valid = df.dropna()
+    df_valid = df.dropna(subset=[
+    close_col,
+    "25MA", "50MA", "75MA",
+    "BB_+1σ", "BB_+2σ", "BB_-1σ", "BB_-2σ",
+    "RSI",
+])
+
     if df_valid.empty or len(df_valid) < 5:
         raise ValueError("テクニカル指標を計算するためのデータが不足しています。")
 
