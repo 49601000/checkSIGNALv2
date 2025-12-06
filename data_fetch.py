@@ -282,3 +282,49 @@ def get_price_and_meta(
         "per_fwd": per_fwd,   # JPX: PER予
         "eps_fwd": eps_fwd,   # JPX: 予想EPS
     }
+
+
+
+# -----------------------------------------------------------
+# エラー特定
+# -----------------------------------------------------------
+
+def get_us_eps_bps_from_fmp(symbol: str, api_key: str):
+    if not api_key:
+        print("[FMP] API key が設定されていません")
+        return None, None, None, None
+
+    url = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{symbol}?apikey={api_key}"
+    print(f"[FMP] request -> {url}")  # ★ どの URL を叩いているか
+
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[FMP] request error ({symbol}): {e}")
+        return None, None, None, None
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        print(f"[FMP] json error ({symbol}): {e}, text={resp.text[:200]}")
+        return None, None, None, None
+
+    print(f"[FMP] raw json ({symbol}): {data}")  # ★ 返ってきた JSON を確認
+
+    # data が list じゃなければエラー
+    if not isinstance(data, list) or not data:
+        print(f"[FMP] unexpected payload ({symbol}): {data}")
+        return None, None, None, None
+
+    ratios = data[0]
+
+    eps_ttm = ratios.get("epsTTM") or ratios.get("netIncomePerShareTTM")
+    bps_ttm = ratios.get("bvpsTTM") or ratios.get("bookValuePerShareTTM")
+    per_ttm = ratios.get("peTTM") or ratios.get("priceEarningsRatioTTM")
+    pbr_ttm = ratios.get("pbTTM") or ratios.get("priceToBookRatioTTM")
+
+    print(f"[FMP] parsed ({symbol}) eps={eps_ttm}, bps={bps_ttm}, pe={per_ttm}, pb={pbr_ttm}")
+
+    return eps_ttm, bps_ttm, per_ttm, pbr_ttm
+
