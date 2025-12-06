@@ -37,6 +37,8 @@ def render_app():
     dividend_yield = base["dividend_yield"]
     eps = base.get("eps")
     bps = base.get("bps")
+    eps_fwd = base.get("eps_fwd")  # 予想EPS（新）
+    per_fwd = base.get("per_fwd")  # PER予（新）
 
     # ------------ テクニカル指標 + PER/PBR ------------
     try:
