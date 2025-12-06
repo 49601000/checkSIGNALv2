@@ -13,6 +13,14 @@ def setup_page():
 def render_app():
     setup_page()
 
+    # ------------ FMP API Key ------------
+    # （.streamlit/secrets.toml に FMP_API_KEY を設定しておく）
+    try:
+        FMP_API_KEY = st.secrets["FMP_API_KEY"]
+    except KeyError:
+        st.error("FMP_API_KEY が st.secrets に設定されていません。")
+        st.stop()
+
     # ------------ 入力 ------------
     user_input = st.text_input("ティッカーを入力（例：7203, 8306.T, AAPL）", value="")
     ticker = convert_ticker(user_input)
@@ -22,7 +30,8 @@ def render_app():
 
     # ------------ データ取得 ------------
     try:
-        base = get_price_and_meta(ticker)
+        # ★ ここで FMP の API キーを渡す（米国株は FMP, 日本株は IRBANK を data_fetch 側で判定）
+        base = get_price_and_meta(ticker, fmp_api_key=FMP_API_KEY)
     except ValueError as e:
         st.error(str(e))
         st.stop()
@@ -37,8 +46,8 @@ def render_app():
     dividend_yield = base["dividend_yield"]
     eps = base.get("eps")
     bps = base.get("bps")
-    eps_fwd = base.get("eps_fwd")  # 予想EPS（新）
-    per_fwd = base.get("per_fwd")  # PER予（新）
+    eps_fwd = base.get("eps_fwd")  # 予想EPS
+    per_fwd = base.get("per_fwd")  # PER予
 
     # ------------ テクニカル指標 + PER/PBR ------------
     try:
@@ -50,7 +59,7 @@ def render_app():
             eps=eps,
             bps=bps,
             eps_fwd=eps_fwd,
-            per_fwd=per_fwd
+            per_fwd=per_fwd,
         )
     except ValueError as e:
         st.error(str(e))
@@ -68,17 +77,17 @@ def render_app():
     st.markdown("---")
     st.markdown(f"## 📌 {ticker}（{company_name}）")
 
-        # PER / PBR の文字列整形（None のときは "—"）
+    # PER / PBR の文字列整形（None のときは "—"）
     per_val = tech.get("per")
     pbr_val = tech.get("pbr")
     per_str = f"{per_val:.2f}倍" if per_val is not None else "—"
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val is not None else "—"
 
     # 予想 PER（テクニカル側で per_fwd を計算済み）
-    per_fwd_val = tech.get("per_fwd")   # ← キー名を修正
+    per_fwd_val = tech.get("per_fwd")
     per_fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
 
-    # 予想 PBR はまだロジックを作っていないので基本は None のまま
+    # 予想 PBR は今は常に None の想定（将来用フック）
     pbr_fwd_val = tech.get("pbr_fwd")
     pbr_fwd_str = f"{pbr_fwd_val:.2f}倍" if pbr_fwd_val is not None else "—"
 
