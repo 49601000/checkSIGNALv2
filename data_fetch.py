@@ -9,16 +9,16 @@ import yfinance as yf
 import pandas as pd
 import streamlit as st
 
+# -----------------------------------------------------------
+# 定数
+# -----------------------------------------------------------
 IRBANK_BASE = "https://irbank.net/"
 ALPHA_BASE = "https://www.alphavantage.co/query"
 
-# -----------------------------------------------------------
-# Secrets
-# -----------------------------------------------------------
-try:
-    ALPHA_VANTAGE_API_KEY: Optional[str] = st.secrets["ALPHA_VANTAGE_API_KEY"]
-except Exception:
-    ALPHA_VANTAGE_API_KEY = None
+# Streamlit Secrets から Alpha Vantage API キー取得
+ALPHA_VANTAGE_API_KEY: Optional[str] = st.secrets.get(
+    "ALPHA_VANTAGE_API_KEY", None
+)
 
 
 # -----------------------------------------------------------
@@ -26,7 +26,7 @@ except Exception:
 # -----------------------------------------------------------
 def convert_ticker(ticker: str) -> str:
     """
-    4〜5桁の数字だけなら自動で .T を付与（東証）
+    4〜5桁の数字のみなら自動で .T を付与（東証）
     それ以外は大文字にしてそのまま返す（米株など）
     """
     t = ticker.strip().upper()
@@ -50,29 +50,33 @@ def is_jpx_ticker(ticker: str) -> bool:
 
 
 # -----------------------------------------------------------
-# 共通ヘルパ
+# 共通ユーティリティ
 # -----------------------------------------------------------
 def _safe_float(x) -> Optional[float]:
     try:
-        if x in (None, "", "None"):
+        if x is None or x == "":
             return None
         return float(x)
     except Exception:
         return None
 
 
-# -----------------------------------------------------------
-# 配当利回り（yfinance）
-# -----------------------------------------------------------
-def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[float]:
+def _compute_dividend_yield(
+    ticker_obj: yf.Ticker, close: float
+) -> Optional[float]:
+    """
+    yfinance.Ticker.dividends から過去1年分の配当利回り（%）を計算。
+    """
     divs = ticker_obj.dividends
 
     if not isinstance(divs, pd.Series) or len(divs) == 0 or close <= 0:
         return None
 
+    # index を datetime64[ns] に統一
     divs.index = pd.to_datetime(divs.index, errors="coerce")
     divs = divs.dropna()
 
+    # タイムゾーン除去
     try:
         if getattr(divs.index, "tz", None) is not None:
             divs.index = divs.index.tz_localize(None)
@@ -90,10 +94,10 @@ def _compute_dividend_yield(ticker_obj: yf.Ticker, close: float) -> Optional[flo
     return float(annual_div / close * 100.0) if close > 0 else None
 
 
-# -----------------------------------------------------------
-# 銘柄名取得
-# -----------------------------------------------------------
 def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
+    """
+    yfinance.info から銘柄名を取得。なければティッカーで代用。
+    """
     name = None
     try:
         info = ticker_obj.info or {}
@@ -105,11 +109,27 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 
 
 # -----------------------------------------------------------
-# IRBANK から EPS/BPS/PER予（日本株）
+# IRBANK から 日本株の EPS/BPS/PER予/ROE/ROA/自己資本比率 を取得
 # -----------------------------------------------------------
-def get_eps_bps_irbank(
+def get_jpx_fundamentals_irbank(
     code: str,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+) -> Tuple[
+    Optional[float],  # eps
+    Optional[float],  # bps
+    Optional[float],  # per_fwd
+    Optional[float],  # roe (%)
+    Optional[float],  # roa (%)
+    Optional[float],  # equity_ratio (%)
+]:
+    """
+    IRBANK の『株式指標』ページから
+    - EPS（連 or 単）          → 実績EPS
+    - BPS（連 or 単）          → 実績BPS
+    - PER予                    → 予想PER
+    - ROE（連）                → ROE %
+    - ROA（連）                → ROA %
+    - 株主資本比率（連）       → 自己資本比率 %
+    """
     url = f"{IRBANK_BASE}{code}"
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -121,11 +141,14 @@ def get_eps_bps_irbank(
         resp.raise_for_status()
     except Exception as e:
         print(f"[IRBANK] request error ({code}): {e}")
-        return None, None, None
+        return None, None, None, None, None, None
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
     def extract_number_near(label: str) -> Optional[float]:
+        """
+        ラベル文字列の近くに出てくる数値（% や 円/株 含む）をざっくり抜き出す。
+        """
         node = soup.find(string=re.compile(re.escape(label)))
         if not node:
             return None
@@ -144,6 +167,7 @@ def get_eps_bps_irbank(
             cur = cur.find_next(string=True)
         return None
 
+    # EPS / BPS
     eps = (
         extract_number_near("EPS（連）")
         or extract_number_near("EPS（単）")
@@ -155,62 +179,98 @@ def get_eps_bps_irbank(
         or extract_number_near("BPS")
     )
 
-    # PER予 っぽいラベルをいくつか試す
-    per_fwd = None
-    for label in ["PER予", "PER（予）", "PER(予)", "予想PER", "予PER"]:
-        per_fwd = extract_number_near(label)
-        if per_fwd is not None:
-            break
+    # 予想PER（存在しない銘柄もある）
+    per_fwd = extract_number_near("PER予")
 
-    return eps, bps, per_fwd
+    # ROE / ROA / 自己資本比率（いずれも % 表記）
+    roe = extract_number_near("ROE（連）") or extract_number_near("ROE")
+    roa = extract_number_near("ROA（連）") or extract_number_near("ROA")
+    equity_ratio = (
+        extract_number_near("株主資本比率（連）")
+        or extract_number_near("株主資本比率")
+    )
+
+    return eps, bps, per_fwd, roe, roa, equity_ratio
 
 
 # -----------------------------------------------------------
-# Alpha Vantage から EPS/BPS/ForwardPE（主に米株）
+# Alpha Vantage から 米株の EPS/BPS/ROE/ROA/自己資本比率(近似) を取得
 # -----------------------------------------------------------
-def get_us_fundamentals_from_alpha(
+def get_us_fundamentals_alpha(
     symbol: str,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+) -> Tuple[
+    Optional[float],  # eps
+    Optional[float],  # bps
+    Optional[float],  # roe (%)
+    Optional[float],  # roa (%)
+    Optional[float],  # equity_ratio (% approx)
+]:
     """
-    Alpha Vantage OVERVIEW から
-    - EPS         -> data["EPS"]
-    - BPS         -> data["BookValue"]
-    - 予想PER      -> data["ForwardPE"]
-    を取得して返す。
+    Alpha Vantage の OVERVIEW から
+    - EPS
+    - BookValue
+    - ReturnOnEquityTTM
+    - ReturnOnAssetsTTM
+    を取得し、ROE/ROA は %、自己資本比率は ROA/ROE から近似値を算出。
     """
-    if not ALPHA_VANTAGE_API_KEY:
-        print("[ALPHA] API key not set")
-        return None, None, None
+    eps = bps = roe_pct = roa_pct = equity_ratio_pct = None
+
+    api_key = ALPHA_VANTAGE_API_KEY
+    if not api_key:
+        print("[Alpha] API key not set")
+        return eps, bps, roe_pct, roa_pct, equity_ratio_pct
 
     params = {
         "function": "OVERVIEW",
         "symbol": symbol,
-        "apikey": ALPHA_VANTAGE_API_KEY,
+        "apikey": api_key,
     }
 
     try:
-        resp = requests.get(ALPHA_BASE, params=params, timeout=15)
+        resp = requests.get(ALPHA_BASE, params=params, timeout=10)
         resp.raise_for_status()
+    except Exception as e:
+        print(f"[Alpha] request error ({symbol}): {e}")
+        return eps, bps, roe_pct, roa_pct, equity_ratio_pct
+
+    try:
         data = resp.json()
     except Exception as e:
-        print(f"[ALPHA] overview request error ({symbol}): {e}")
-        return None, None, None
+        print(f"[Alpha] json error ({symbol}): {e}, text={resp.text[:200]}")
+        return eps, bps, roe_pct, roa_pct, equity_ratio_pct
 
-    if isinstance(data, dict) and data.get("Note"):
-        # レートリミットなどの時
-        print(f"[ALPHA] Note for {symbol}: {data.get('Note')}")
-        return None, None, None
+    if not isinstance(data, dict) or not data:
+        print(f"[Alpha] unexpected payload ({symbol}): {data}")
+        return eps, bps, roe_pct, roa_pct, equity_ratio_pct
 
-    eps = _safe_float(data.get("EPS"))
-    bps = _safe_float(data.get("BookValue"))
-    per_fwd = _safe_float(data.get("ForwardPE"))
+    eps_val = _safe_float(data.get("EPS"))
+    bps_val = _safe_float(data.get("BookValue"))
+    roe_raw = _safe_float(data.get("ReturnOnEquityTTM"))
+    roa_raw = _safe_float(data.get("ReturnOnAssetsTTM"))
 
-    print(f"[ALPHA] parsed ({symbol}) eps={eps}, bps={bps}, ForwardPE={per_fwd}")
-    return eps, bps, per_fwd
+    if eps_val is not None:
+        eps = eps_val
+    if bps_val is not None:
+        bps = bps_val
+
+    # Alpha の ROE/ROA は 0.15 (=15%) のような小数なので % に変換
+    if roe_raw is not None:
+        roe_pct = roe_raw * 100.0
+    if roa_raw is not None:
+        roa_pct = roa_raw * 100.0
+
+    # 自己資本比率 ≒ ROA / ROE（同じ期間の数値前提）
+    if roe_raw not in (None, 0.0) and roa_raw not in (None, 0.0):
+        approx = roa_raw / roe_raw  # 0.04 / 0.10 = 0.4
+        # 0〜1 の範囲にあるものだけ採用（明らかに変な値は捨てる）
+        if 0.0 < approx < 1.0:
+            equity_ratio_pct = approx * 100.0
+
+    return eps, bps, roe_pct, roa_pct, equity_ratio_pct
 
 
 # -----------------------------------------------------------
-# メイン：価格 + メタ情報 + EPS/BPS/予想EPS
+# メイン：価格 + メタ情報 + ファンダメンタル
 # -----------------------------------------------------------
 def get_price_and_meta(
     ticker: str,
@@ -220,10 +280,10 @@ def get_price_and_meta(
     """
     - yfinance.download で OHLCV
     - yfinance.Ticker で銘柄名・配当
-    - JPX: IRBANK + （不足分は yfinance.info["forwardPE"]）
-    - それ以外（米国株など）：Alpha Vantage OVERVIEW
+    - JPX: IRBANK から EPS/BPS/PER予/ROE/ROA/自己資本比率
+    - US:  Alpha Vantage から EPS/BPS/ROE/ROA/自己資本比率(近似)
     """
-    # --- 価格データ ---
+    # --- 価格データ（yfinance）---
     try:
         df = yf.download(ticker, period=period, interval=interval)
     except Exception as e:
@@ -232,9 +292,11 @@ def get_price_and_meta(
     if df.empty:
         raise ValueError("株価データが取得できませんでした。")
 
+    # yfinance のマルチカラム対応
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join(col).strip() for col in df.columns]
 
+    # Close 列特定
     try:
         close_col = next(c for c in df.columns if "Close" in c)
     except StopIteration:
@@ -246,44 +308,50 @@ def get_price_and_meta(
     close = float(df[close_col].iloc[-1])
     previous_close = float(df[close_col].iloc[-2])
 
+    # 52週高値・安値（取得期間内で代用）
     high_52w = float(df[close_col].max())
     low_52w = float(df[close_col].min())
 
-    # --- yfinance.Ticker ---
+    # --- yfinance.Ticker（銘柄名 + 配当利回り）---
     ticker_obj = yf.Ticker(ticker)
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
-    # --- ファンダメンタル初期値 ---
+    # --- ファンダメンタルの初期値 ---
     eps: Optional[float] = None
     bps: Optional[float] = None
     per_fwd: Optional[float] = None
-    eps_fwd: Optional[float] = None
+    eps_fwd: Optional[float] = None  # 予想EPS（現状は JPX のみ想定）
+    roe_pct: Optional[float] = None
+    roa_pct: Optional[float] = None
+    equity_ratio_pct: Optional[float] = None
 
-    # --- JPX or US で分岐 ---
+    # --- 日本株 or 米株の分岐 ---
     if is_jpx_ticker(ticker):
-        # 例: "2801.T" -> "2801"
+        # "2801.T" -> "2801" に変換
         code_for_irbank = ticker.replace(".T", "") if ticker.endswith(".T") else ticker
-        eps, bps, per_fwd = get_eps_bps_irbank(code_for_irbank)
+        (
+            eps,
+            bps,
+            per_fwd,
+            roe_pct,
+            roa_pct,
+            equity_ratio_pct,
+        ) = get_jpx_fundamentals_irbank(code_for_irbank)
 
-        # IRBANK で PER予 が取れない場合は yfinance.info["forwardPE"] を試す
-        if per_fwd is None:
-            try:
-                info = ticker_obj.info or {}
-                per_fwd = _safe_float(info.get("forwardPE"))
-            except Exception:
-                per_fwd = None
-
-        # PER予 が取れていれば 予想EPS = 価格 / PER予
+        # PER予が取れていて株価も正なら、そこから予想EPSを逆算
         if per_fwd not in (None, 0.0) and close > 0:
             eps_fwd = close / per_fwd
 
     else:
-        # 米国銘柄など → Alpha Vantage
-        eps, bps, per_fwd = get_us_fundamentals_from_alpha(ticker)
-        # ForwardPE が取れていればそこから予想EPSを逆算
-        if per_fwd not in (None, 0.0) and close > 0:
-            eps_fwd = close / per_fwd
+        # 米国銘柄など → Alpha Vantage OVERVIEW
+        (
+            eps,
+            bps,
+            roe_pct,
+            roa_pct,
+            equity_ratio_pct,
+        ) = get_us_fundamentals_alpha(ticker)
 
     return {
         "df": df,
@@ -294,8 +362,12 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        "eps": eps,         # 実績EPS
-        "bps": bps,         # 実績BPS
-        "per_fwd": per_fwd, # 予想PER（IRBANK or Alpha Vantage）
-        "eps_fwd": eps_fwd, # 予想EPS（価格 / 予想PER）
+        # ファンダメンタル
+        "eps": eps,                 # 実績EPS
+        "bps": bps,                 # 実績BPS
+        "per_fwd": per_fwd,         # JPX: 予想PER
+        "eps_fwd": eps_fwd,         # JPX: 予想EPS
+        "roe": roe_pct,             # ROE (%)
+        "roa": roa_pct,             # ROA (%)
+        "equity_ratio": equity_ratio_pct,  # 自己資本比率 (%、USは近似)
     }
