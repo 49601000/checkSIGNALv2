@@ -13,13 +13,18 @@ def setup_page():
 def render_app():
     setup_page()
 
-    # ------------ FMP API Key ------------
-    # （.streamlit/secrets.toml に FMP_API_KEY を設定しておく）
-    try:
-        ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
-    except KeyError:
+    # ------------ Alpha Vantage API Key の存在チェック ------------
+    # .streamlit/secrets.toml に
+    # ALPHA_VANTAGE_API_KEY = "xxxxx"
+    # を設定しておくこと
+    if "ALPHA_VANTAGE_API_KEY" not in st.secrets:
         st.error("ALPHA_VANTAGE_API_KEY が st.secrets に設定されていません。")
         st.stop()
+
+    st.write(
+        "ALPHA_VANTAGE_API_KEY loaded?:",
+        "ALPHA_VANTAGE_API_KEY" in st.secrets,
+    )
 
     # ------------ 入力 ------------
     user_input = st.text_input("ティッカーを入力（例：7203, 8306.T, AAPL）", value="")
@@ -30,8 +35,8 @@ def render_app():
 
     # ------------ データ取得 ------------
     try:
-        # ★ ここで FMP の API キーを渡す（米国株は FMP, 日本株は IRBANK を data_fetch 側で判定）
-        st.write("ALPHA_VANTAGE_API_KEY loaded?:", "ALPHA_VANTAGE_API_KEY" in st.secrets)
+        # 日本株 → IRBANK / yfinance
+        # 米国株 → Alpha Vantage / yfinance（data_fetch 側で判定）
         base = get_price_and_meta(ticker)
     except ValueError as e:
         st.error(str(e))
@@ -45,13 +50,16 @@ def render_app():
     low_52w = base["low_52w"]
     company_name = base["company_name"]
     dividend_yield = base["dividend_yield"]
-    eps = base.get("eps")
-    bps = base.get("bps")
-    eps_fwd = base.get("eps_fwd")  # 予想EPS
-    per_fwd = base.get("per_fwd")  # PER予
+    eps = base.get("eps")           # 実績 EPS
+    bps = base.get("bps")           # 実績 BPS
+    eps_fwd = base.get("eps_fwd")   # 予想 EPS
+    per_fwd = base.get("per_fwd")   # 予想 PER（あれば）
 
-    # ここに一時デバッグ表示を追加
-    st.write("DEBUG fundamental:",{"eps": eps, "bps": bps, "eps_fwd": eps_fwd, "per_fwd": per_fwd})
+    # 一時デバッグ用（不要になったら消してOK）
+    st.write(
+        "DEBUG fundamental:",
+        {"eps": eps, "bps": bps, "eps_fwd": eps_fwd, "per_fwd": per_fwd},
+    )
 
     # ------------ テクニカル指標 + PER/PBR ------------
     try:
@@ -87,7 +95,7 @@ def render_app():
     per_str = f"{per_val:.2f}倍" if per_val is not None else "—"
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val is not None else "—"
 
-    # 予想 PER（テクニカル側で per_fwd を計算済み）
+    # 予想 PER（compute_indicators 側で per_fwd を計算済み）
     per_fwd_val = tech.get("per_fwd")
     per_fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val is not None else "—"
 
