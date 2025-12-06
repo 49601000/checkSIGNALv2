@@ -1,74 +1,6 @@
 # indicators.py
 from typing import Optional
 import pandas as pd
-import requests
-
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
-
-
-def fetch_fmp_fundamentals(
-    symbol: str,
-) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    FMP から EPS / BPS / 予想EPS を取得するヘルパー関数。
-    - EPS:    key-metrics-ttm の epsTTM
-    - BPS:    key-metrics-ttm の bookValuePerShareTTM
-    - 予想EPS: analyst-estimates の estimatedEPSAvg（直近 1 件）
-    """
-    eps: Optional[float] = None
-    bps: Optional[float] = None
-    eps_fwd: Optional[float] = None
-
-    # Streamlit secrets から API キー取得（存在しなければ何もしない）
-    api_key: Optional[str] = None
-    try:
-        import streamlit as st
-
-        api_key = st.secrets.get("FMP_API_KEY")  # ユーザー側で管理
-    except Exception:
-        api_key = None
-
-    if not api_key:
-        # API キーが無い場合は FMP を使わずに終了
-        return eps, bps, eps_fwd
-
-    params = {"apikey": api_key}
-
-    # --- EPS / BPS（TTM） ---
-    try:
-        url_km = f"{FMP_BASE_URL}/key-metrics-ttm/{symbol}"
-        resp = requests.get(url_km, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list) and data:
-            row = data[0]
-            eps_val = row.get("epsTTM") or row.get("eps")
-            bps_val = (
-                row.get("bookValuePerShareTTM") or row.get("bookValuePerShare")
-            )
-            if isinstance(eps_val, (int, float)):
-                eps = float(eps_val)
-            if isinstance(bps_val, (int, float)):
-                bps = float(bps_val)
-    except Exception as e:
-        print(f"[FMP] key-metrics-ttm error ({symbol}): {e}")
-
-    # --- 予想EPS（アナリスト予想） ---
-    try:
-        url_est = f"{FMP_BASE_URL}/analyst-estimates/{symbol}"
-        params_est = {**params, "limit": 1}
-        resp = requests.get(url_est, params=params_est, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list) and data:
-            row = data[0]
-            eps_fwd_val = row.get("estimatedEPSAvg")
-            if isinstance(eps_fwd_val, (int, float)):
-                eps_fwd = float(eps_fwd_val)
-    except Exception as e:
-        print(f"[FMP] analyst-estimates error ({symbol}): {e}")
-
-    return eps, bps, eps_fwd
 
 
 def slope_arrow(series: pd.Series, window: int = 3) -> str:
@@ -205,7 +137,7 @@ def compute_indicators(
     close_col: str,
     high_52w: float,
     low_52w: float,
-    ticker: Optional[str] = None,
+    ticker: Optional[str] = None,  # いまは未使用。将来拡張用に残しておく。
     eps: Optional[float] = None,
     bps: Optional[float] = None,
     eps_fwd: Optional[float] = None,
@@ -215,23 +147,12 @@ def compute_indicators(
     df に各種テクニカル指標を追加し、判定に必要な値をまとめて返す。
 
     - テクニカル系: MA / BB / RSI などはローカル計算
-    - ファンダ系: EPS / BPS / 予想EPS は
-        1) 引数で渡されていればそれを優先
-        2) 無ければ ticker が指定されているとき FMP から取得
-    ここで EPS/BPS から PER/PBR を計算する。
+    - ファンダ系: EPS / BPS / 予想EPS / 予想PER は
+        data_fetch.get_price_and_meta() から渡された値をそのまま利用する。
+      （このモジュールから外部 API は叩かない）
     """
     # 終値（最新）
     price = float(df[close_col].iloc[-1])
-
-    # --- 必要であれば FMP から EPS/BPS/予想EPS を取得 ---
-    if ticker and (eps is None or bps is None or eps_fwd is None):
-        fmp_eps, fmp_bps, fmp_eps_fwd = fetch_fmp_fundamentals(ticker)
-        if eps is None:
-            eps = fmp_eps
-        if bps is None:
-            bps = fmp_bps
-        if eps_fwd is None:
-            eps_fwd = fmp_eps_fwd
 
     # === 移動平均 ===
     df["25MA"] = df[close_col].rolling(25).mean()
@@ -305,8 +226,7 @@ def compute_indicators(
     if bps not in (None, 0):
         pbr = price / bps
 
-    # 予想 PER（FMP/IRBANK 由来の per_fwd を優先し、
-    # 無ければ eps_fwd から計算）
+    # 予想 PER（per_fwd を優先し、無ければ eps_fwd から計算）
     per_fwd_calc: Optional[float] = None
     if per_fwd not in (None, 0):
         per_fwd_calc = per_fwd
