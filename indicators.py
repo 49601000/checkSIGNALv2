@@ -2,6 +2,15 @@
 from typing import Optional
 import pandas as pd
 
+from data_fetch import get_eps_bps_irbank
+
+# '2801.T' → '2801' にして渡す
+code = ticker.split(".")[0]
+
+eps, bps = (None, None)
+if code.isdigit():  # 日本株のときだけ IRBANK を叩く
+    eps, bps = get_eps_bps_irbank(code)
+
 
 def slope_arrow(series: pd.Series, window: int = 3) -> str:
     if len(series.dropna()) < window + 1:
