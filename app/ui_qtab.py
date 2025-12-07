@@ -13,8 +13,6 @@ def render_q_tab(tech: dict):
     """Q（ビジネスの質）タブ + 補正UI"""
 
     q_score = float(tech.get("q_score", 0.0))
-    v_score = float(tech.get("v_score", 0.0))
-    t_score = float(tech.get("t_score", 0.0))
 
     roe = tech.get("roe")
     roa = tech.get("roa")
