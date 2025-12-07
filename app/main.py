@@ -1,7 +1,7 @@
 import streamlit as st
 
-from modules.data_fetch import convert_ticker, get_price_and_meta
-from modules.indicators import compute_indicators
+from app.modules.data_fetch import convert_ticker, get_price_and_meta
+from app.modules.indicators import compute_indicators
 
 from app.ui_components import setup_page, render_header_block
 from app.ui_ttab import render_t_tab
