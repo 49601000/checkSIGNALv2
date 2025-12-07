@@ -71,6 +71,7 @@ def render_q_tab(tech: dict):
             st.error("ROE / ROA のデータが不足しているため補正計算ができません。")
             return
 
+        # ★ apply_q_correction の引数は実装に合わせてね
         result = apply_q_correction(
             original_q=q_score,
             v_score=v_score,
@@ -96,16 +97,15 @@ def render_q_tab(tech: dict):
         with c1:
             # 元のQを左側に
             st.metric("Qスコア（補正前）", f"{q_score:.1f}")
-            # もし q_base 等を result に入れているならそちらを使ってもOK
-            # st.metric("Qスコア（補正前）", f"{result['q_base']:.1f}")
 
         with c2:
             st.metric("Qスコア（補正後）", f"{q_corr:.1f}")
             st.metric("QVT（補正後）", f"{qvt_corr:.1f}")
 
+        # ✅ ボタン押下＆計算成功時だけ表示される説明文
         st.info("セクター基準を用いて Q と QVT を補正した結果を表示しています。")
+        st.caption(
+            "Q補正は、ROE / ROA をセクター平均と比較したバイアスを付与する簡易モデルです。"
+        )
 
-    st.markdown("---")
-    st.caption(
-        "Q補正は、ROE / ROA をセクター平均と比較したバイアスを付与する簡易モデルです。"
-    )
+    # ここより下には何も置かない（常時表示したくないため）
