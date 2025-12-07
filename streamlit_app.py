@@ -7,7 +7,7 @@ sys.path.append(ROOT)
 sys.path.append(os.path.join(ROOT, "app"))
 sys.path.append(os.path.join(ROOT, "modules"))
 
-from app.main import render_app
+from app.main import main
 
 if __name__ == "__main__":
-    render_app()
+    main()
