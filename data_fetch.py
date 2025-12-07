@@ -1,5 +1,4 @@
-# data_fetch.py
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 import re
 from datetime import datetime, timedelta
 
@@ -14,6 +13,9 @@ import streamlit as st
 # -----------------------------------------------------------
 IRBANK_BASE = "https://irbank.net/"
 ALPHA_BASE = "https://www.alphavantage.co/query"
+
+# 銘柄名キャッシュ（IRBANK / Alpha Vantage のレスポンスから埋める）
+COMPANY_NAME_CACHE: Dict[str, str] = {}
 
 # Streamlit Secrets から Alpha Vantage API キー取得
 ALPHA_VANTAGE_API_KEY: Optional[str] = st.secrets.get(
@@ -96,8 +98,17 @@ def _compute_dividend_yield(
 
 def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
     """
-    yfinance.info から銘柄名を取得。なければティッカーで代用。
+    可能なら yfinance を叩く前に、モジュール内キャッシュから銘柄名を取得。
+    なければ最後の手段として yfinance.info を見る。
     """
+    key = fallback_ticker.strip().upper()
+
+    # 1️⃣ まず自前キャッシュをチェック
+    cached = COMPANY_NAME_CACHE.get(key)
+    if cached:
+        return cached
+
+    # 2️⃣ キャッシュがなければ従来どおり yfinance.info にフォールバック
     name = None
     try:
         info = ticker_obj.info or {}
@@ -129,6 +140,8 @@ def get_jpx_fundamentals_irbank(
     - ROE（連）                → ROE %
     - ROA（連）                → ROA %
     - 株主資本比率（連）       → 自己資本比率 %
+
+    ついでに <title> から会社名を拾ってモジュール内キャッシュに保存する。
     """
     url = f"{IRBANK_BASE}{code}"
     headers = {
@@ -144,6 +157,20 @@ def get_jpx_fundamentals_irbank(
         return None, None, None, None, None, None
 
     soup = BeautifulSoup(resp.text, "html.parser")
+
+    # 会社名を <title> からざっくり取得してキャッシュ
+    try:
+        title_tag = soup.find("title")
+        if title_tag and title_tag.string:
+            title_text = title_tag.string.strip()
+            # 例: 「ローツェ(株)【6323】 株価/株式情報 - IRBANK」
+            company_name = title_text.split("【")[0].strip()
+            if company_name:
+                # "6323" / "6323.T" どちらで呼ばれても拾えるよう両方キャッシュ
+                COMPANY_NAME_CACHE[code] = company_name
+                COMPANY_NAME_CACHE[f"{code}.T"] = company_name
+    except Exception as e:
+        print(f"[IRBANK] name parse error ({code}): {e}")
 
     def extract_number_near(label: str) -> Optional[float]:
         """
@@ -212,6 +239,8 @@ def get_us_fundamentals_alpha(
     - ReturnOnEquityTTM
     - ReturnOnAssetsTTM
     を取得し、ROE/ROA は %、自己資本比率は ROA/ROE から近似値を算出。
+
+    併せて "Name" を会社名としてキャッシュする。
     """
     eps = bps = roe_pct = roa_pct = equity_ratio_pct = None
 
@@ -242,6 +271,11 @@ def get_us_fundamentals_alpha(
     if not isinstance(data, dict) or not data:
         print(f"[Alpha] unexpected payload ({symbol}): {data}")
         return eps, bps, roe_pct, roa_pct, equity_ratio_pct
+
+    # 会社名をキャッシュ
+    name_val = data.get("Name")
+    if isinstance(name_val, str) and name_val.strip():
+        COMPANY_NAME_CACHE[symbol.upper()] = name_val.strip()
 
     eps_val = _safe_float(data.get("EPS"))
     bps_val = _safe_float(data.get("BookValue"))
@@ -312,11 +346,6 @@ def get_price_and_meta(
     high_52w = float(df[close_col].max())
     low_52w = float(df[close_col].min())
 
-    # --- yfinance.Ticker（銘柄名 + 配当利回り）---
-    ticker_obj = yf.Ticker(ticker)
-    company_name = _get_company_name(ticker_obj, ticker)
-    dividend_yield = _compute_dividend_yield(ticker_obj, close)
-
     # --- ファンダメンタルの初期値 ---
     eps: Optional[float] = None
     bps: Optional[float] = None
@@ -326,7 +355,7 @@ def get_price_and_meta(
     roa_pct: Optional[float] = None
     equity_ratio_pct: Optional[float] = None
 
-    # --- 日本株 or 米株の分岐 ---
+    # --- 日本株 or 米株の分岐（先にファンダを取得して会社名キャッシュを埋める） ---
     if is_jpx_ticker(ticker):
         # "2801.T" -> "2801" に変換
         code_for_irbank = ticker.replace(".T", "") if ticker.endswith(".T") else ticker
@@ -352,6 +381,12 @@ def get_price_and_meta(
             roa_pct,
             equity_ratio_pct,
         ) = get_us_fundamentals_alpha(ticker)
+
+    # --- yfinance.Ticker（銘柄名 + 配当利回り）---
+    ticker_obj = yf.Ticker(ticker)
+    # ここでまず IRBANK / Alpha が埋めたキャッシュを見て、なければ info にフォールバック
+    company_name = _get_company_name(ticker_obj, ticker)
+    dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
     return {
         "df": df,
