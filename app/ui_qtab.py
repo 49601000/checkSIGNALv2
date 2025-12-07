@@ -71,14 +71,9 @@ def render_q_tab(tech: dict):
             st.error("ROE / ROA のデータが不足しているため補正計算ができません。")
             return
 
-        # ★ apply_q_correction の引数は実装に合わせてね
+        # ✅ q_correction.py の dict 仕様に合わせた呼び出し
         result = apply_q_correction(
-            original_q=q_score,
-            v_score=v_score,
-            t_score=t_score,
-            roe=roe,
-            roa=roa,
-            equity_ratio=equity_ratio,
+            tech=tech,
             sector_roe=sector_roe,
             sector_roa=sector_roa,
         )
@@ -96,6 +91,7 @@ def render_q_tab(tech: dict):
 
         with c1:
             # 元のQを左側に
+            # （result["q_base"] を使っても OK。値は q_score と同じはず）
             st.metric("Qスコア（補正前）", f"{q_score:.1f}")
 
         with c2:
