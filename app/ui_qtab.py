@@ -94,7 +94,6 @@ def render_q_tab(tech: dict):
 
         with c2:
             st.metric("Qスコア（補正後）", f"{q_corr:.1f}")
-            st.metric("QVT（補正後）", f"{qvt_corr:.1f}")
 
         # ✅ QVTタブ用に session_state に保存
         st.session_state["q_correction_result"] = {
@@ -104,7 +103,7 @@ def render_q_tab(tech: dict):
         }
 
         # 説明文
-        st.info("セクター基準を用いて Q と QVT を補正した結果を表示しています。")
+        st.info("セクター基準を用いて Q を補正した結果を表示しています。")
         st.caption(
             "Q補正は、ROE / ROA をセクター平均と比較したバイアスを付与する簡易モデルです。"
         )
