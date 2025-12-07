@@ -1,12 +1,16 @@
 import sys
 import os
 
-# --- プロジェクトルートを sys.path に追加 ---
+# --- プロジェクトルート（streamlit_app.py の場所） ---
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-sys.path.append(ROOT)                              # /
-sys.path.append(os.path.join(ROOT, "app"))         # /app
-sys.path.append(os.path.join(ROOT, "app", "modules"))  # /app/modules
+# --- パス追加（絶対にこの順番で！） ---
+sys.path.insert(0, ROOT)                            # /
+sys.path.insert(0, os.path.join(ROOT, "app"))       # /app
+sys.path.insert(0, os.path.join(ROOT, "app", "modules"))  # /app/modules
+
+# Debug: 実際にパスがどうなってるか確認
+print("PYTHONPATH:", sys.path)
 
 from app.main import main
 
