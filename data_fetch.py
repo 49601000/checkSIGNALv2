@@ -120,25 +120,31 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 
 def _clean_jpx_company_name(name: str) -> str:
     """
-    IRBANK のタイトル等から取った会社名から
-    「|株式情報」「｜株式情報」「株価/株式情報」などの
-    余計なサフィックスを削る。
+    IRBANK のタイトルから会社名を抽出した際に付く
+    「|株式情報」「｜株式情報」「| 株式情報」などの
+    全パターンを除去する。
     """
     if not isinstance(name, str):
         return name
 
+    # 全角・半角バー + 任意スペース + 株式情報
     patterns = [
         "株価/株式情報",
         "株価・株式情報",
+        "｜ 株式情報",
         "｜株式情報",
+        "| 株式情報",
         "|株式情報",
         "株式情報",
     ]
+
     for p in patterns:
         if p in name:
             name = name.split(p)[0]
-    # 末尾のスペースや「-」「|」などを掃除
-    return name.strip(" -｜|　")
+
+    # よく残るゴミ文字（全角/半角スペース・バー・ハイフンなど）を削る
+    return name.strip(" 　-|｜")
+
 
 # -----------------------------------------------------------
 # IRBANK から 日本株の EPS/BPS/PER予/ROE/ROA/自己資本比率 を取得
