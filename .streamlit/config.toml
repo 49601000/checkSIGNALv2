@@ -3,7 +3,7 @@ headless = true
 
 [theme]
 primaryColor="#F63366"            # ボタンとかの色
-backgroundColor="#FFF9E6"         # メイン背景色
+backgroundColor="#d7edc5"         # メイン背景色
 secondaryBackgroundColor="#f5f7fb" # サイドバーやカードの色
 textColor="#222222"               # 文字色
 font="sans serif"                 # "sans serif" / "serif" / "monospace"
