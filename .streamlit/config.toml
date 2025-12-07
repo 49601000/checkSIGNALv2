@@ -1,0 +1,8 @@
+[server]
+headless = true
+
+[theme]
+primaryColor = "#4B9CD3"
+
+[global]
+scriptPath = "app/main.py"
