@@ -73,26 +73,6 @@ def apply_q_correction(
 ) -> Dict[str, Any]:
     """
     Qタブから呼び出されるメイン関数。
-
-    Parameters
-    ----------
-    tech : dict
-        compute_indicators が返す dict 全体。
-    sector_roe : float | None
-        ユーザー入力のセクターROE目安（%）。
-    sector_roa : float | None
-        ユーザー入力のセクターROA目安（%）。
-
-    Returns
-    -------
-    dict
-        {
-          "q_base": 元のQスコア,
-          "q_corrected": 補正後Qスコア,
-          "qvt_corrected": 補正後QVTスコア,
-          "roe_rel": ROEの相対スコア,
-          "roa_rel": ROAの相対スコア,
-        }
     """
     base_q = float(tech.get("q_score", 0.0))
     v_score = float(tech.get("v_score", 0.0))
@@ -135,11 +115,3 @@ def apply_q_correction(
         "roa_rel": roa_rel,
     }
 
-
-        st.info("セクター基準を用いて Q と QVT を補正した結果を表示しています。")
-
-    st.markdown("---")
-
-    st.caption(
-        "Q補正は、ROE / ROA をセクター平均と比較したバイアスを付与する簡易モデルです。"
-    )
