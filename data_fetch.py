@@ -118,6 +118,27 @@ def _get_company_name(ticker_obj: yf.Ticker, fallback_ticker: str) -> str:
 
     return name or fallback_ticker
 
+def _clean_jpx_company_name(name: str) -> str:
+    """
+    IRBANK のタイトル等から取った会社名から
+    「|株式情報」「｜株式情報」「株価/株式情報」などの
+    余計なサフィックスを削る。
+    """
+    if not isinstance(name, str):
+        return name
+
+    patterns = [
+        "株価/株式情報",
+        "株価・株式情報",
+        "｜株式情報",
+        "|株式情報",
+        "株式情報",
+    ]
+    for p in patterns:
+        if p in name:
+            name = name.split(p)[0]
+    # 末尾のスペースや「-」「|」などを掃除
+    return name.strip(" -｜|　")
 
 # -----------------------------------------------------------
 # IRBANK から 日本株の EPS/BPS/PER予/ROE/ROA/自己資本比率 を取得
@@ -163,14 +184,16 @@ def get_jpx_fundamentals_irbank(
         title_tag = soup.find("title")
         if title_tag and title_tag.string:
             title_text = title_tag.string.strip()
-            # 例: 「ローツェ(株)【6323】 株価/株式情報 - IRBANK」
-            company_name = title_text.split("【")[0].strip()
+            # 例: 「2801 キッコーマン｜株式情報 - IRBANK」 などを想定
+            raw_name = title_text.split("【")[0]
+            company_name = _clean_jpx_company_name(raw_name)
             if company_name:
-                # "6323" / "6323.T" どちらで呼ばれても拾えるよう両方キャッシュ
+                # "2801" / "2801.T" どちらで呼ばれても拾えるよう両方キャッシュ
                 COMPANY_NAME_CACHE[code] = company_name
                 COMPANY_NAME_CACHE[f"{code}.T"] = company_name
     except Exception as e:
         print(f"[IRBANK] name parse error ({code}): {e}")
+
 
     def extract_number_near(label: str) -> Optional[float]:
         """
