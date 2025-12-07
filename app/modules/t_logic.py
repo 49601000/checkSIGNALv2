@@ -14,8 +14,6 @@ t_logic.py
 
 from typing import Tuple, Optional, Dict, Any
 
-import pandas as pd
-
 
 # -----------------------------------------------------------
 # BB テキスト判定
@@ -66,7 +64,7 @@ def is_high_price_zone(
     if high_52w and price < high_52w * 0.95:
         score += 15
 
-    # per / pbr を使った追加ロジックを入れたくなればここに足す
+    # per / pbr を使った追加ロジックを入れたくなればここに足す余地あり
     return score
 
 
@@ -179,6 +177,7 @@ def calc_timing_score(
 
     t = 50.0  # ニュートラル
 
+    # RSI
     if rsi is not None:
         t += (50 - rsi) * 0.6  # RSI低いほどプラス
 
