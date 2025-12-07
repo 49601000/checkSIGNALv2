@@ -40,86 +40,101 @@ q_correction.py
 このモジュールは Q スコアの“代替”ではなく、“補助レイヤー”として設計されている。
 """
 
-import streamlit as st
-from modules.q_correction import apply_q_correction
+from typing import Optional, Dict, Any
 
 
-def render_q_tab(tech: dict):
-    """Q（ビジネスの質）タブ + 補正UI"""
+def _relative_score(
+    actual: Optional[float],
+    sector: Optional[float],
+    cap: float = 1.5,
+) -> Optional[float]:
+    """
+    実績値 / セクター値 から 0〜100 の相対スコアを計算する簡易関数。
 
-    q_score = tech["q_score"]
-    v_score = tech["v_score"]
-    t_score = tech["t_score"]
+    - ratio = actual / sector
+    - ratio が 1.0 なら 70 点ぐらい
+    - ratio が cap 以上なら 100 点
+    - ratio が 0.0 なら 0 点
+    """
+    if actual is None or sector in (None, 0):
+        return None
+
+    ratio = actual / sector
+    ratio = max(0.0, min(cap, ratio))
+
+    # 0〜cap を 0〜100 に線形マッピング
+    return round(ratio / cap * 100.0, 1)
+
+
+def apply_q_correction(
+    tech: Dict[str, Any],
+    sector_roe: Optional[float],
+    sector_roa: Optional[float],
+) -> Dict[str, Any]:
+    """
+    Qタブから呼び出されるメイン関数。
+
+    Parameters
+    ----------
+    tech : dict
+        compute_indicators が返す dict 全体。
+    sector_roe : float | None
+        ユーザー入力のセクターROE目安（%）。
+    sector_roa : float | None
+        ユーザー入力のセクターROA目安（%）。
+
+    Returns
+    -------
+    dict
+        {
+          "q_base": 元のQスコア,
+          "q_corrected": 補正後Qスコア,
+          "qvt_corrected": 補正後QVTスコア,
+          "roe_rel": ROEの相対スコア,
+          "roa_rel": ROAの相対スコア,
+        }
+    """
+    base_q = float(tech.get("q_score", 0.0))
+    v_score = float(tech.get("v_score", 0.0))
+    t_score = float(tech.get("t_score", 0.0))
 
     roe = tech.get("roe")
     roa = tech.get("roa")
-    equity_ratio = tech.get("equity_ratio")
 
-    st.subheader("🏢 Q（ビジネスの質）")
+    roe_rel = _relative_score(roe, sector_roe)
+    roa_rel = _relative_score(roa, sector_roa)
 
-    # ------------------------------
-    # 生のQスコア
-    # ------------------------------
-    st.metric("Qスコア（元）", f"{q_score:.1f} / 100")
+    # 相対スコアの平均（有効なものだけ）
+    rel_list = [x for x in (roe_rel, roa_rel) if x is not None]
 
-    st.markdown("#### 財務・収益性（元データ）")
+    # 補正係数（セクター偏差をどの程度 Q に反映するか）
+    CORRECTION_ALPHA = 0.5  # 0.0〜1.0 で調整
+    NEUTRAL_REL = 70.0      # ratio=1.0 付近を「中立」とみなす
 
-    st.markdown(
-        f"""
-- ROE: **{roe:.1f}%**  
-- ROA: **{roa:.1f}%**  
-- 自己資本比率: **{equity_ratio:.1f}%**
-"""
-    )
+    if rel_list:
+        rel_avg = sum(rel_list) / len(rel_list)
+        rel_delta = rel_avg - NEUTRAL_REL  # ← 偏差ベース
 
-    st.markdown("---")
-    st.markdown("### 🧩 セクター平均を入力して Qスコアを補正")
+        # 元Qに偏差の一部だけを加算する形で補正
+        q_corrected_raw = base_q + CORRECTION_ALPHA * rel_delta
 
-    col1, col2 = st.columns(2)
+        # スコアは 0〜100 にクリップ
+        q_corrected = round(max(0.0, min(100.0, q_corrected_raw)), 1)
+    else:
+        # セクター値が入ってなければ元のQをそのまま使う
+        q_corrected = base_q
 
-    with col1:
-        sector_roe = st.number_input(
-            "セクター平均ROE（%）",
-            min_value=0.0, max_value=40.0, value=10.0, step=0.1
-        )
+    # 補正後Q を使った QVT
+    qvt_corrected = round((q_corrected + v_score + t_score) / 3.0, 1)
 
-    with col2:
-        sector_roa = st.number_input(
-            "セクター平均ROA（%）",
-            min_value=0.0, max_value=20.0, value=4.0, step=0.1
-        )
+    return {
+        "q_base": base_q,
+        "q_corrected": q_corrected,
+        "qvt_corrected": qvt_corrected,
+        "roe_rel": roe_rel,
+        "roa_rel": roa_rel,
+    }
 
-    # 補正ボタン
-    correct_button = st.button("補正する")
-
-    if correct_button:
-        result = apply_q_correction(
-            original_q=q_score,
-            v_score=v_score,
-            t_score=t_score,
-            roe=roe,
-            roa=roa,
-            equity_ratio=equity_ratio,
-            sector_roe=sector_roe,
-            sector_roa=sector_roa,
-        )
-
-        q_corr = result["q_corrected"]
-        qvt_corr = result["qvt_corrected"]
-
-        if q_corr is None:
-            st.error("補正計算ができません（データ不足）。")
-            return
-
-        st.markdown("### 📌 補正後スコア")
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            st.metric("Qスコア（補正後）", f"{q_corr:.1f}")
-
-        with c2:
-            st.metric("QVT（補正後）", f"{qvt_corr:.1f}")
 
         st.info("セクター基準を用いて Q と QVT を補正した結果を表示しています。")
 
