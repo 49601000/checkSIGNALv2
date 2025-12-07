@@ -38,9 +38,10 @@ def render_t_tab(tech: dict):
         short_trend_ok = "○" if trend_conditions[1] else "×"
         qvt_ok = "○" if qvt_score >= 60 else "×"
 
-        center_price = (tech["ma25"] + tech["ma50"]) / 2
+        # ★ dict に合わせてキー名を修正
+        center_price = (tech["ma_25"] + tech["ma_50"]) / 2
         upper_price = center_price * 1.03
-        lower_price = max(center_price * 0.95, tech["bb_lower1"])
+        lower_price = max(center_price * 0.95, tech["bb_minus1"])
 
         comment_text = tech["trend_comment"]
 
@@ -57,7 +58,8 @@ def render_t_tab(tech: dict):
         short_trend_ok = "○" if contrarian_conditions[1] else "×"
         qvt_ok = "○" if qvt_score >= 60 else "×"
 
-        center_price = (tech["ma25"] + tech["bb_lower1"]) / 2
+        # ★ こちらも同様にキー名を揃える
+        center_price = (tech["ma_25"] + tech["bb_minus1"]) / 2
         upper_price = center_price * 1.08
         lower_price = center_price * 0.97
 
