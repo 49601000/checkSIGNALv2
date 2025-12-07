@@ -10,6 +10,16 @@ def setup_page():
     st.title("🔍買いシグナルチェッカー")
 
 
+def _fmt_float(x, digits: int = 2) -> str:
+    """None / 不正値対応付きの float 表示ヘルパー"""
+    if x is None:
+        return "—"
+    try:
+        return f"{float(x):.{digits}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def render_header_block(
     ticker: str,
     company_name: str,
@@ -37,6 +47,15 @@ def render_header_block(
     pbr_str = f"{pbr_val:.2f}倍" if pbr_val else "—"
     per_fwd_str = f"{per_fwd_val:.2f}倍" if per_fwd_val else "—"
 
+    # ---- ここで MA / 矢印を indicators の命名に合わせて取得 ----
+    ma_25 = tech.get("ma_25")
+    ma_50 = tech.get("ma_50")
+    ma_75 = tech.get("ma_75")
+
+    arrow_25 = tech.get("arrow_25", "")
+    arrow_50 = tech.get("arrow_50", "")
+    arrow_75 = tech.get("arrow_75", "")
+
     st.markdown("---")
     st.markdown(f"## 📌 {ticker}（{company_name}）")
 
@@ -46,9 +65,9 @@ def render_header_block(
 
     **PER**: {per_str} ｜ **予想PER**: {per_fwd_str} ｜ **PBR**: {pbr_str}<br><br>
 
-    **25MA**: {tech['ma25']:.2f} {tech['arrow25']} ｜ 
-    **50MA**: {tech['50MA'] if '50MA' in tech else tech['ma50']:.2f} {tech['arrow50']} ｜ 
-    **75MA**: {tech['75MA'] if '75MA' in tech else tech['ma75']:.2f} {tech['arrow75']}
+    **25MA**: {_fmt_float(ma_25)} {arrow_25} ｜ 
+    **50MA**: {_fmt_float(ma_50)} {arrow_50} ｜ 
+    **75MA**: {_fmt_float(ma_75)} {arrow_75}
     """
     st.markdown(html, unsafe_allow_html=True)
 
