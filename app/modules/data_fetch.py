@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
 import streamlit as st
+import time
 
 # -----------------------------------------------------------
 # 定数
@@ -341,25 +342,37 @@ def get_price_and_meta(
     interval: str = "1d",
 ):
     """
-    - yfinance.download で OHLCV
+    - yfinance.download で OHLCV（リトライ付き）
     - yfinance.Ticker で銘柄名・配当
     - JPX: IRBANK から EPS/BPS/PER予/ROE/ROA/自己資本比率
     - US:  Alpha Vantage から EPS/BPS/ROE/ROA/自己資本比率(近似)
     """
-    # --- 価格データ（yfinance）---
-    try:
-        df = yf.download(ticker, period=period, interval=interval)
-    except Exception as e:
-        raise ValueError(f"株価データ取得エラー: {e}")
+    df = None
+    last_err: Optional[Exception] = None
 
-    if df.empty:
+    # --- 価格データ（yfinance） リトライ付き ---
+    for attempt in range(2):  # 最大 2 回トライ
+        try:
+            df = yf.download(ticker, period=period, interval=interval)
+        except Exception as e:
+            last_err = e
+            df = pd.DataFrame()
+
+        if not df.empty and len(df) >= 2:
+            break  # 成功したのでループ脱出
+
+        time.sleep(1)  # 少し待ってから再トライ
+
+    if df is None or df.empty or len(df) < 2:
+        # 例外が取れていればメッセージ付きで返す
+        if last_err is not None:
+            raise ValueError(f"株価データ取得エラー: {last_err}")
         raise ValueError("株価データが取得できませんでした。")
 
-    # yfinance のマルチカラム対応
+    # ここから下はもう一度ダウンロードしなくてOK
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join(col).strip() for col in df.columns]
 
-    # Close 列特定
     try:
         close_col = next(c for c in df.columns if "Close" in c)
     except StopIteration:
@@ -371,22 +384,19 @@ def get_price_and_meta(
     close = float(df[close_col].iloc[-1])
     previous_close = float(df[close_col].iloc[-2])
 
-    # 52週高値・安値（取得期間内で代用）
     high_52w = float(df[close_col].max())
     low_52w = float(df[close_col].min())
 
-    # --- ファンダメンタルの初期値 ---
+    # --- ここから下は今のあなたのコードをそのまま ---
     eps: Optional[float] = None
     bps: Optional[float] = None
     per_fwd: Optional[float] = None
-    eps_fwd: Optional[float] = None  # 予想EPS（現状は JPX のみ想定）
+    eps_fwd: Optional[float] = None
     roe_pct: Optional[float] = None
     roa_pct: Optional[float] = None
     equity_ratio_pct: Optional[float] = None
 
-    # --- 日本株 or 米株の分岐（先にファンダを取得して会社名キャッシュを埋める） ---
     if is_jpx_ticker(ticker):
-        # "2801.T" -> "2801" に変換
         code_for_irbank = ticker.replace(".T", "") if ticker.endswith(".T") else ticker
         (
             eps,
@@ -397,12 +407,9 @@ def get_price_and_meta(
             equity_ratio_pct,
         ) = get_jpx_fundamentals_irbank(code_for_irbank)
 
-        # PER予が取れていて株価も正なら、そこから予想EPSを逆算
         if per_fwd not in (None, 0.0) and close > 0:
             eps_fwd = close / per_fwd
-
     else:
-        # 米国銘柄など → Alpha Vantage OVERVIEW
         (
             eps,
             bps,
@@ -411,9 +418,7 @@ def get_price_and_meta(
             equity_ratio_pct,
         ) = get_us_fundamentals_alpha(ticker)
 
-    # --- yfinance.Ticker（銘柄名 + 配当利回り）---
     ticker_obj = yf.Ticker(ticker)
-    # ここでまず IRBANK / Alpha が埋めたキャッシュを見て、なければ info にフォールバック
     company_name = _get_company_name(ticker_obj, ticker)
     dividend_yield = _compute_dividend_yield(ticker_obj, close)
 
@@ -426,12 +431,11 @@ def get_price_and_meta(
         "low_52w": low_52w,
         "company_name": company_name,
         "dividend_yield": dividend_yield,
-        # ファンダメンタル
-        "eps": eps,                 # 実績EPS
-        "bps": bps,                 # 実績BPS
-        "per_fwd": per_fwd,         # JPX: 予想PER
-        "eps_fwd": eps_fwd,         # JPX: 予想EPS
-        "roe": roe_pct,             # ROE (%)
-        "roa": roa_pct,             # ROA (%)
-        "equity_ratio": equity_ratio_pct,  # 自己資本比率 (%、USは近似)
+        "eps": eps,
+        "bps": bps,
+        "per_fwd": per_fwd,
+        "eps_fwd": eps_fwd,
+        "roe": roe_pct,
+        "roa": roa_pct,
+        "equity_ratio": equity_ratio_pct,
     }
