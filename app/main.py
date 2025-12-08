@@ -24,6 +24,7 @@ def main():
     )
     ticker = convert_ticker(user_input)
     if not ticker:
+        st.info("ティッカーを入力すると結果が表示されます。")
         st.stop()
 
     # --- データ取得 ---
